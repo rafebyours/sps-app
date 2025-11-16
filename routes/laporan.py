@@ -196,3 +196,5 @@ def update_laporan_status(laporan_id):
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()
+
+        
