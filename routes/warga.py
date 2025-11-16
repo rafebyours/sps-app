@@ -1,4 +1,5 @@
-from flask import Blueprint, jsonify, request
+# routes/warga.py
+from flask import Blueprint, request, jsonify
 import pymysql
 from config import DB_CONFIG
 
@@ -7,26 +8,49 @@ warga_bp = Blueprint('warga', __name__, url_prefix='/api/warga')
 def get_connection():
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
 
-# API key sederhana
-API_KEY = "sps_app_key_12345"
-
-def api_key_required(f):
-    from functools import wraps
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        api_key = request.headers.get("X-API-KEY")
-        if api_key != API_KEY:
-            return jsonify({"message": "Unauthorized"}), 401
-        return f(*args, **kwargs)
-    return decorated
-
-# GET semua warga
+# GET /api/warga  → ambil semua warga
 @warga_bp.route('/', methods=['GET'])
-@api_key_required
 def get_all_warga():
     conn = get_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT * FROM warga")
-        result = cursor.fetchall()
-    conn.close()
-    return jsonify(result)
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+                SELECT w.id, w.nama_warga, w.alamat, w.lokasi,
+                       w.longitude, w.latitude,
+                       u.username, u.status, u.role
+                FROM warga w
+                JOIN users u ON w.user_id = u.id
+            """
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return jsonify({"success": True, "data": rows}), 200
+    except Exception as e:
+        print("get_all_warga error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+
+# GET /api/warga/<id>  → ambil 1 warga by id
+@warga_bp.route('/<int:warga_id>', methods=['GET'])
+def get_warga_by_id(warga_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+                SELECT w.id, w.nama_warga, w.alamat, w.lokasi,
+                       w.longitude, w.latitude,
+                       u.username, u.status, u.role
+                FROM warga w
+                JOIN users u ON w.user_id = u.id
+                WHERE w.id = %s
+            """
+            cursor.execute(sql, (warga_id,))
+            row = cursor.fetchone()
+        if not row:
+            return jsonify({"success": False, "message": "Data warga tidak ditemukan"}), 404
+        return jsonify({"success": True, "data": row}), 200
+    except Exception as e:
+        print("get_warga_by_id error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
