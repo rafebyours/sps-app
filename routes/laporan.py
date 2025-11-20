@@ -153,10 +153,18 @@ def create_laporan():
     finally:
         conn.close()
 
+"""
+keterangan : update_laporan_status
+- kalo status diubah ke dijemput → auto bikin riwayat status = 'diambil'
+- kalo diubah ke selesai → auto biki riwayat status = 'selesai'
+- id_petugas bisa dikirim di body PATCH (opsional), biar di riwayat juga kecatet gitu siapa yang ngambil.
+"""
+
 @laporan_bp.route('/<int:laporan_id>/status', methods=['PATCH'])
 def update_laporan_status(laporan_id):
     data = request.json or {}
     new_status = data.get('status')
+    id_petugas = data.get('id_petugas') 
 
     if not new_status:
         return jsonify({"success": False, "message": "status wajib diisi"}), 400
@@ -173,7 +181,10 @@ def update_laporan_status(laporan_id):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id, status FROM laporan_sampah WHERE id = %s", (laporan_id,))
+            cursor.execute(
+                "SELECT id, id_warga, jumlah_karung, status FROM laporan_sampah WHERE id = %s",
+                (laporan_id,)
+            )
             laporan = cursor.fetchone()
             if not laporan:
                 return jsonify({"success": False, "message": "Data laporan tidak ditemukan"}), 404
@@ -181,8 +192,40 @@ def update_laporan_status(laporan_id):
             if laporan['status'] == 'selesai' and new_status != 'selesai':
                 return jsonify({"success": False, "message": "Laporan yang sudah selesai tidak bisa diubah"}), 400
 
-            sql = "UPDATE laporan_sampah SET status = %s WHERE id = %s"
-            cursor.execute(sql, (new_status, laporan_id))
+            sql_update = "UPDATE laporan_sampah SET status = %s WHERE id = %s"
+            cursor.execute(sql_update, (new_status, laporan_id))
+
+            # ==== Tambah ke riwayat_aktivitas ====
+            # Mapping status laporan -> status di riwayat_aktivitas
+            riwayat_status = None
+            if new_status == 'dijemput':
+                riwayat_status = 'diambil'   
+            elif new_status == 'selesai':
+                riwayat_status = 'selesai'
+
+            if riwayat_status:
+                petugas_id_val = None
+                if id_petugas not in (None, "", 0, "0"):
+                    try:
+                        petugas_id_val = int(id_petugas)
+                    except ValueError:
+                        petugas_id_val = None  
+
+                sql_riwayat = """
+                    INSERT INTO riwayat_aktivitas
+                        (id_warga, id_petugas, jumlah_karung, status)
+                    VALUES (%s, %s, %s, %s)
+                """
+                cursor.execute(
+                    sql_riwayat,
+                    (
+                        laporan['id_warga'],
+                        petugas_id_val,
+                        laporan['jumlah_karung'],
+                        riwayat_status
+                    )
+                )
+
             conn.commit()
 
         return jsonify({
@@ -196,5 +239,3 @@ def update_laporan_status(laporan_id):
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()
-
-        
