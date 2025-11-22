@@ -9,6 +9,7 @@ from routes.laporan import laporan_bp
 from routes.gaji import gaji_bp
 from routes.riwayat import riwayat_bp
 from routes.pemasukan import pemasukan_bp
+from routes.pengeluaran import pengeluaran_bp
 
 app = Flask(__name__)
 CORS(app)
@@ -23,6 +24,7 @@ app.register_blueprint(laporan_bp)
 app.register_blueprint(gaji_bp)
 app.register_blueprint(riwayat_bp)
 app.register_blueprint(pemasukan_bp)
+app.register_blueprint(pengeluaran_bp)
 
 @app.route('/')
 def index():
