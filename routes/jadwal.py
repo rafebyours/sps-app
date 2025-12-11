@@ -2,7 +2,8 @@
 from flask import Blueprint, request, jsonify
 import pymysql
 from config import DB_CONFIG
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+
 
 jadwal_bp = Blueprint('jadwal', __name__, url_prefix='/api/jadwal')
 
@@ -89,12 +90,7 @@ def get_jadwal_by_id(jadwal_id):
         conn.close()
 
 @jadwal_bp.route('/today', methods=['GET'])
-def get_today_jadwal_for_petugas():
-    id_petugas = request.args.get('id_petugas')
-
-    if not id_petugas:
-        return jsonify({"success": False, "message": "id_petugas wajib diisi"}), 400
-
+def get_today_jadwal_user():
     today = date.today().strftime("%Y-%m-%d")  # 'YYYY-MM-DD'
 
     conn = get_connection()
@@ -103,16 +99,22 @@ def get_today_jadwal_for_petugas():
             sql = """
                 SELECT j.id, j.tanggal, j.jam_mulai, j.jam_selesai,
                        j.wilayah, j.status,
-                       j.id_petugas, p.nama_petugas
+                       p.nama_petugas
                 FROM jadwal j
                 LEFT JOIN petugas p ON j.id_petugas = p.id
                 WHERE j.tanggal = %s
-                  AND (j.id_petugas = %s OR j.id_petugas IS NULL)
                   AND j.status = 'aktif'
                 ORDER BY j.jam_mulai ASC
             """
-            cursor.execute(sql, (today, id_petugas))
+            cursor.execute(sql, (today,))
             rows = cursor.fetchall()
+
+            # Convert jam ke string supaya bisa di-jsonify
+            for r in rows:
+                if r.get('jam_mulai'):
+                    r['jam_mulai'] = str(r['jam_mulai'])
+                if r.get('jam_selesai'):
+                    r['jam_selesai'] = str(r['jam_selesai'])
 
         return jsonify({
             "success": True,
@@ -120,10 +122,11 @@ def get_today_jadwal_for_petugas():
             "data": rows
         }), 200
     except Exception as e:
-        print("get_today_jadwal_for_petugas error:", e)
+        print("get_today_jadwal_user error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()
+
 
 @jadwal_bp.route('/', methods=['POST'])
 def create_jadwal():
@@ -211,6 +214,44 @@ def create_jadwal():
     except Exception as e:
         print("create_jadwal error:", e)
         conn.rollback()
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+
+
+@jadwal_bp.route('/week', methods=['GET'])
+def get_next_week_jadwal():
+    today = date.today()
+    week_ahead = today + timedelta(days=7)
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+                    SELECT j.id, j.tanggal, j.jam_mulai, j.jam_selesai,
+                        j.wilayah, j.status,
+                        p.nama_petugas
+                    FROM jadwal j
+                    LEFT JOIN petugas p ON j.id_petugas = p.id
+                    WHERE j.tanggal BETWEEN %s AND %s
+                    ORDER BY j.tanggal ASC, j.jam_mulai ASC
+                """
+
+            # urutan parameter harus sesuai: start_date, end_date
+            cursor.execute(sql, (today, week_ahead))
+            rows = cursor.fetchall()
+
+            # convert jam_mulai & jam_selesai ke string agar bisa JSON
+            for r in rows:
+                if r.get('jam_mulai'):
+                    r['jam_mulai'] = str(r['jam_mulai'])
+                if r.get('jam_selesai'):
+                    r['jam_selesai'] = str(r['jam_selesai'])
+
+        return jsonify({"success": True, "data": rows}), 200
+
+    except Exception as e:
+        print("get_next_week_jadwal error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()

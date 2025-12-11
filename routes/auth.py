@@ -4,6 +4,12 @@ from config import DB_CONFIG
 import jwt
 import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask import Flask
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)  # <-- aktifkan CORS
+
 
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 SECRET_KEY = "sps_secret_key"  # bisa diganti, simpan rahasia
@@ -53,3 +59,4 @@ def login():
         return jsonify({"token": token})
     else:
         return jsonify({"message": "Invalid credentials"}), 401
+

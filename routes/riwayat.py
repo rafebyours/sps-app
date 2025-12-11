@@ -6,6 +6,7 @@ from config import DB_CONFIG
 riwayat_bp = Blueprint('riwayat', __name__, url_prefix='/api/riwayat')
 
 def get_connection():
+    
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
 
 """
