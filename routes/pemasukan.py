@@ -46,6 +46,10 @@ def get_all_pemasukan():
 
             cursor.execute(sql, params)
             rows = cursor.fetchall()
+            
+            for r in rows:
+                if r.get("tanggal"):
+                    r["tanggal"] = r["tanggal"].strftime("%Y-%m-%d %H:%M:%S")
 
         return jsonify({"success": True, "data": rows}), 200
     except Exception as e:

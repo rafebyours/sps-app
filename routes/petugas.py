@@ -16,16 +16,20 @@ def get_petugas():
             cursor.execute("SELECT * FROM petugas ORDER BY id DESC")
             rows = cursor.fetchall()
         return jsonify({"success": True, "data": rows}), 200
+
     except Exception as e:
         print("get_petugas error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500
+        
     finally:
         conn.close()
+
 
 @petugas_bp.route('/', methods=['POST'])
 def add_petugas():
     data = request.json
     conn = get_connection()
+
     try:
         with conn.cursor() as cursor:
             sql = """
@@ -40,13 +44,17 @@ def add_petugas():
                 data.get('longitude', 0),
                 data.get('latitude', 0)
             ))
-            conn.commit()
+
+        conn.commit()
         return jsonify({"success": True, "message": "Petugas berhasil ditambahkan"}), 201
+
     except Exception as e:
         print("add_petugas error:", e)
         return jsonify({"success": False, "message": "Gagal menambah data"}), 500
+        
     finally:
         conn.close()
+
 
 @petugas_bp.route('/<int:id>', methods=['DELETE'])
 def delete_petugas(id):
@@ -55,41 +63,64 @@ def delete_petugas(id):
         with conn.cursor() as cursor:
             cursor.execute("DELETE FROM petugas WHERE id = %s", (id,))
             conn.commit()
+
         return jsonify({"success": True, "message": "Petugas dihapus"}), 200
+
     except Exception as e:
         print("delete_petugas error:", e)
         return jsonify({"success": False, "message": "Gagal menghapus"}), 500
+
     finally:
         conn.close()
+
 
 @petugas_bp.route('/create', methods=['POST'])
 def create_petugas():
     data = request.json
-    required = ['username', 'password', 'name', 'phone', 'address']
+    required = ['username', 'password', 'nama_petugas', 'no_telp', 'alamat']
 
-    # Validasi
+    # Validasi field wajib
     for field in required:
         if field not in data or data[field] == '':
             return jsonify({"success": False, "message": f"{field} wajib diisi"}), 400
 
     conn = get_connection()
+
     try:
         with conn.cursor() as cursor:
-            # 1️⃣ Buat akun di users
+            # buat akun user
             hashed_pass = generate_password_hash(data['password'])
-            sql_user = "INSERT INTO users (username, password, role, status) VALUES (%s, %s, %s, %s)"
-            cursor.execute(sql_user, (data['username'], hashed_pass, 'petugas', 'active'))
+            sql_user = """
+                INSERT INTO users (username, password, role, status)
+                VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(sql_user, (
+                data['username'],
+                hashed_pass,
+                'petugas',
+                'active'
+            ))
             user_id = cursor.lastrowid
 
-            # 2️⃣ Masukkan data petugas
-            sql_petugas = "INSERT INTO petugas (user_id, name, phone, address) VALUES (%s, %s, %s, %s)"
-            cursor.execute(sql_petugas, (user_id, data['name'], data['phone'], data['address']))
+            # insert petugas
+            sql_petugas = """
+                INSERT INTO petugas (user_id, nama_petugas, no_telp, alamat)
+                VALUES (%s, %s, %s, %s)
+            """
+            cursor.execute(sql_petugas, (
+                user_id,
+                data['nama_petugas'],
+                data['no_telp'],
+                data['alamat']
+            ))
 
         conn.commit()
         return jsonify({"success": True, "message": "Petugas berhasil dibuat"}), 201
+
     except Exception as e:
         conn.rollback()
         print("create_petugas error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500
+
     finally:
         conn.close()
