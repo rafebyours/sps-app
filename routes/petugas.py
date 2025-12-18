@@ -1,33 +1,139 @@
 from flask import Blueprint, request, jsonify
 import pymysql
+from werkzeug.security import generate_password_hash
 from config import DB_CONFIG
 
 petugas_bp = Blueprint('petugas', __name__, url_prefix='/api/petugas')
 
+
+# =========================
+# koneksi DB
+# =========================
 def get_connection():
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
 
+
+# map status DB → UI frontend
 def map_status_for_ui(db_status: str) -> str:
-    # laporan_sampah.status: menunggu | dijemput | selesai
     if db_status == 'menunggu':
         return 'Belum diambil'
-    # dijemput/selesai dianggap sudah diambil (sesuai UI kamu)
     return 'Sudah diambil'
 
+
+# =========================
+# GET semua petugas
+# =========================
+@petugas_bp.route('/', methods=['GET'])
+def get_petugas():
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM petugas ORDER BY id DESC")
+            rows = cursor.fetchall()
+        return jsonify({"success": True, "data": rows}), 200
+    except Exception as e:
+        print("get_petugas error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+
+
+# =========================
+# CREATE petugas + user
+# =========================
+@petugas_bp.route('/create', methods=['POST'])
+def create_petugas():
+    data = request.json
+    required = ['username', 'password', 'nama_petugas', 'no_telp', 'alamat']
+
+    for field in required:
+        if field not in data or data[field] == '':
+            return jsonify({"success": False, "message": f"{field} wajib diisi"}), 400
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            hashed_pass = generate_password_hash(data['password'])
+            cursor.execute("""
+                INSERT INTO users (username, password, role, status)
+                VALUES (%s, %s, %s, %s)
+            """, (data['username'], hashed_pass, 'petugas', 'active'))
+
+            user_id = cursor.lastrowid
+
+            cursor.execute("""
+                INSERT INTO petugas (user_id, nama_petugas, no_telp, alamat)
+                VALUES (%s, %s, %s, %s)
+            """, (user_id, data['nama_petugas'], data['no_telp'], data['alamat']))
+
+        conn.commit()
+        return jsonify({"success": True, "message": "Petugas berhasil dibuat"}), 201
+    except Exception as e:
+        conn.rollback()
+        print("create_petugas error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+
+
+# =========================
+# DELETE petugas
+# =========================
+@petugas_bp.route('/<int:id>', methods=['DELETE'])
+def delete_petugas(id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM petugas WHERE id = %s", (id,))
+            conn.commit()
+
+        return jsonify({"success": True, "message": "Petugas dihapus"}), 200
+    except Exception as e:
+        print("delete_petugas error:", e)
+        return jsonify({"success": False, "message": "Gagal menghapus"}), 500
+    finally:
+        conn.close()
+
+
+# =========================
+# GET petugas by user_id
+# =========================
+@petugas_bp.route('/by-user/<int:user_id>', methods=['GET'])
+def get_petugas_by_user(user_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, user_id, nama_petugas, no_telp, alamat, status
+                FROM petugas
+                WHERE user_id = %s
+                LIMIT 1
+            """, (user_id,))
+            row = cursor.fetchone()
+
+        if not row:
+            return jsonify({"success": False, "message": "Petugas tidak ditemukan"}), 404
+
+        return jsonify({"success": True, "data": row}), 200
+    except Exception as e:
+        print("get_petugas_by_user error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+
+
+# =========================
+# GET tugas petugas
+# cocok untuk frontend yg kamu kirim
+# =========================
 @petugas_bp.route('/tugas', methods=['GET'])
 def get_tugas_petugas():
-    """
-    Query params:
-      - date: YYYY-MM-DD  (ambil berdasarkan DATE(laporan_sampah.jadwal_pengambilan))
-      - petugas_id: int   (opsional; kalau ada, filter berdasarkan jadwal.wilayah di tanggal itu)
-    """
-    q_date = request.args.get('date')          # "2025-10-19"
+    q_date = request.args.get('date')
     petugas_id = request.args.get('petugas_id')
 
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # 1) Ambil wilayah penugasan petugas (opsional)
             wilayah = None
             if petugas_id and q_date:
                 cursor.execute("""
@@ -40,10 +146,8 @@ def get_tugas_petugas():
                 row = cursor.fetchone()
                 wilayah = row["wilayah"] if row else None
 
-            # 2) Ambil tugas dari laporan_sampah + warga
-            # Gunakan alamat dari laporan_sampah kalau ada, fallback ke warga.alamat
             sql = """
-                SELECT
+                SELECT 
                     ls.id AS id,
                     w.nama_warga AS name,
                     COALESCE(ls.alamat, w.alamat) AS address,
@@ -59,12 +163,8 @@ def get_tugas_petugas():
                 sql += " AND DATE(ls.jadwal_pengambilan) = %s"
                 params.append(q_date)
 
-            # Tampilkan yang relevan untuk “tugas pengambilan”
             sql += " AND ls.status IN ('menunggu','dijemput','selesai')"
 
-            # 3) Filter wilayah kalau jadwal petugas bukan "Seluruh"
-            # Catatan: di DB warga ada kolom `lokasi` (varchar)
-            # Kita pakai lokasi dulu; kalau kosong, bisa fallback ke address LIKE.
             if wilayah and wilayah.lower() != 'seluruh':
                 sql += " AND (w.lokasi = %s OR COALESCE(ls.alamat, w.alamat) LIKE %s)"
                 params.extend([wilayah, f"%{wilayah}%"])
@@ -73,11 +173,7 @@ def get_tugas_petugas():
 
             cursor.execute(sql, params)
             rows = cursor.fetchall()
-<<<<<<< HEAD
-        return jsonify({"success": True, "data": rows}), 200
-=======
 
-        # Bentuk response sesuai kebutuhan frontend
         data = []
         for r in rows:
             data.append({
@@ -85,146 +181,45 @@ def get_tugas_petugas():
                 "name": r["name"],
                 "address": r["address"],
                 "status": map_status_for_ui(r["status_db"]),
-                # frontend kamu filter date, jadi kita kirim format YYYY-MM-DD
                 "date": r["jadwal_pengambilan"].strftime("%Y-%m-%d") if r["jadwal_pengambilan"] else None,
                 "jadwal_pengambilan": r["jadwal_pengambilan"].strftime("%Y-%m-%d %H:%M:%S") if r["jadwal_pengambilan"] else None,
                 "status_db": r["status_db"],
             })
 
         return jsonify({"success": True, "data": data}), 200
->>>>>>> feature/petugas-backend
-
     except Exception as e:
         print("get_tugas_petugas error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500
-        
-    finally:
-        conn.close()
-
-<<<<<<< HEAD
-
-@petugas_bp.route('/', methods=['POST'])
-def add_petugas():
-    data = request.json
-    conn = get_connection()
-
-    try:
-        with conn.cursor() as cursor:
-            sql = """
-                INSERT INTO petugas (user_id, nama_petugas, no_telp, status, longitude, latitude)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """
-            cursor.execute(sql, (
-                data['user_id'],
-                data['nama_petugas'],
-                data['no_telp'],
-                data['status'],
-                data.get('longitude', 0),
-                data.get('latitude', 0)
-            ))
-
-        conn.commit()
-        return jsonify({"success": True, "message": "Petugas berhasil ditambahkan"}), 201
-
-    except Exception as e:
-        print("add_petugas error:", e)
-        return jsonify({"success": False, "message": "Gagal menambah data"}), 500
-        
     finally:
         conn.close()
 
 
-@petugas_bp.route('/<int:id>', methods=['DELETE'])
-def delete_petugas(id):
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("DELETE FROM petugas WHERE id = %s", (id,))
-            conn.commit()
-
-        return jsonify({"success": True, "message": "Petugas dihapus"}), 200
-
-    except Exception as e:
-        print("delete_petugas error:", e)
-        return jsonify({"success": False, "message": "Gagal menghapus"}), 500
-
-    finally:
-        conn.close()
-
-
-@petugas_bp.route('/create', methods=['POST'])
-def create_petugas():
-    data = request.json
-    required = ['username', 'password', 'nama_petugas', 'no_telp', 'alamat']
-
-    # Validasi field wajib
-    for field in required:
-        if field not in data or data[field] == '':
-            return jsonify({"success": False, "message": f"{field} wajib diisi"}), 400
-=======
+# =========================
+# update status ambil tugas
+# =========================
 @petugas_bp.route('/tugas/<int:laporan_id>/ambil', methods=['POST'])
 def ambil_tugas(laporan_id):
-    """
-    Body:
-      - petugas_id (wajib)
-      - jumlah_karung (opsional; kalau belum tahu bisa null)
-    """
     data = request.json or {}
     petugas_id = data.get("petugas_id")
-    jumlah_karung = data.get("jumlah_karung")  # opsional
+    jumlah_karung = data.get("jumlah_karung")
 
     if not petugas_id:
         return jsonify({"success": False, "message": "petugas_id wajib"}), 400
->>>>>>> feature/petugas-backend
 
     conn = get_connection()
-
     try:
         with conn.cursor() as cursor:
-<<<<<<< HEAD
-            # buat akun user
-            hashed_pass = generate_password_hash(data['password'])
-            sql_user = """
-                INSERT INTO users (username, password, role, status)
-                VALUES (%s, %s, %s, %s)
-            """
-            cursor.execute(sql_user, (
-                data['username'],
-                hashed_pass,
-                'petugas',
-                'active'
-            ))
-            user_id = cursor.lastrowid
-
-            # insert petugas
-            sql_petugas = """
-                INSERT INTO petugas (user_id, nama_petugas, no_telp, alamat)
-                VALUES (%s, %s, %s, %s)
-            """
-            cursor.execute(sql_petugas, (
-                user_id,
-                data['nama_petugas'],
-                data['no_telp'],
-                data['alamat']
-            ))
-
-        conn.commit()
-        return jsonify({"success": True, "message": "Petugas berhasil dibuat"}), 201
-=======
-            # Ambil id_warga dari laporan
             cursor.execute("SELECT id_warga, status FROM laporan_sampah WHERE id = %s", (laporan_id,))
             laporan = cursor.fetchone()
             if not laporan:
                 return jsonify({"success": False, "message": "Laporan tidak ditemukan"}), 404
 
-            # Update status laporan jadi dijemput (kalau masih menunggu)
             cursor.execute("""
                 UPDATE laporan_sampah
                 SET status = 'dijemput'
                 WHERE id = %s AND status = 'menunggu'
             """, (laporan_id,))
 
-            # Catat riwayat
             cursor.execute("""
                 INSERT INTO riwayat_aktivitas (id_warga, id_petugas, jumlah_karung, status)
                 VALUES (%s, %s, %s, 'diambil')
@@ -232,17 +227,12 @@ def ambil_tugas(laporan_id):
 
         conn.commit()
         return jsonify({"success": True, "message": "Status diperbarui menjadi dijemput"}), 200
->>>>>>> feature/petugas-backend
-
     except Exception as e:
         conn.rollback()
         print("ambil_tugas error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500
-
     finally:
         conn.close()
-<<<<<<< HEAD
-=======
 
 @petugas_bp.route('/rekap', methods=['GET'])
 def rekap_pengambilan():
@@ -347,28 +337,3 @@ def rekap_pengambilan():
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()
-
-@petugas_bp.route('/by-user/<int:user_id>', methods=['GET'])
-def get_petugas_by_user(user_id):
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                SELECT id, user_id, nama_petugas, no_telp, alamat, status
-                FROM petugas
-                WHERE user_id = %s
-                LIMIT 1
-            """, (user_id,))
-            row = cursor.fetchone()
-
-        if not row:
-            return jsonify({"success": False, "message": "Petugas tidak ditemukan"}), 404
-
-        return jsonify({"success": True, "data": row}), 200
-
-    except Exception as e:
-        print("get_petugas_by_user error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
-        conn.close()
->>>>>>> feature/petugas-backend
