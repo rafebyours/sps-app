@@ -60,3 +60,35 @@ def login():
     else:
         return jsonify({"message": "Invalid credentials"}), 401
 
+
+# routes/auth.py
+@auth_bp.route('/logout', methods=['POST'])
+def logout():
+    try:
+        # Dapatkan token dari header
+        auth_header = request.headers.get('Authorization')
+        
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
+            
+            # Verifikasi token (optional, untuk logging)
+            try:
+                decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+                print(f"User {decoded.get('username')} logged out")
+            except:
+                pass
+            
+        # Selalu return success karena logout di frontend
+        response = jsonify({
+            "success": True,
+            "message": "Logout berhasil"
+        })
+        
+        # Hapus cookie jika ada
+        response.set_cookie('auth_token', '', expires=0)
+        
+        return response, 200
+        
+    except Exception as e:
+        print("Logout error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500

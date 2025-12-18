@@ -71,38 +71,7 @@ def get_all_jadwal():
         conn.close()
 
 
-# GET /api/jadwal/<id>
-@jadwal_bp.route('/<int:jadwal_id>', methods=['GET'])
-def get_jadwal_by_id(jadwal_id):
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            sql = """
-                SELECT j.id, j.tanggal, j.jam_mulai, j.jam_selesai,
-                       j.wilayah, j.status,
-                       p.nama_petugas
-                FROM jadwal j
-                LEFT JOIN petugas p ON j.id_petugas = p.id
-                WHERE j.id = %s
-            """
-            cursor.execute(sql, (jadwal_id,))
-            row = cursor.fetchone()
-
-        if not row:
-            return jsonify({"success": False, "message": "Data jadwal tidak ditemukan"}), 404
-
-        # 🔹 convert jam ke string
-        if 'jam_mulai' in row and row['jam_mulai'] is not None:
-            row['jam_mulai'] = str(row['jam_mulai'])
-        if 'jam_selesai' in row and row['jam_selesai'] is not None:
-            row['jam_selesai'] = str(row['jam_selesai'])
-
-        return jsonify({"success": True, "data": row}), 200
-    except Exception as e:
-        print("get_jadwal_by_id error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
-        conn.close()
+# GET /api/jadwal/<id
 
 @jadwal_bp.route('/today', methods=['GET'])
 def get_today_jadwal_user():
@@ -303,37 +272,41 @@ def create_jadwal_multi():
             sql = f"SELECT id FROM petugas WHERE id IN ({placeholders})"
             cursor.execute(sql, petugas_ids)
             existing_petugas = [row['id'] for row in cursor.fetchall()]
-            
+
             if len(existing_petugas) != len(petugas_ids):
                 return jsonify({
                     "success": False,
                     "message": "Beberapa petugas tidak ditemukan"
                 }), 400
 
-            # Insert jadwal untuk setiap petugas
-            jadwal_ids = []
-            for petugas_id in petugas_ids:
-                sql_insert = """
-                    INSERT INTO jadwal 
-                    (tanggal, jam_mulai, jam_selesai, wilayah, id_petugas, status)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """
-                cursor.execute(sql_insert, (
-                    tanggal,
-                    jam_mulai + ":00" if len(jam_mulai) == 5 else jam_mulai,
-                    jam_selesai + ":00" if len(jam_selesai) == 5 else jam_selesai,
-                    wilayah,
-                    petugas_id,
-                    status
-                ))
-                jadwal_ids.append(cursor.lastrowid)
+            # ===== INSERT jadwal =====
+            sql_insert_jadwal = """
+                INSERT INTO jadwal 
+                (tanggal, jam_mulai, jam_selesai, wilayah, status)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            cursor.execute(sql_insert_jadwal, (
+                tanggal,
+                jam_mulai + ":00" if len(jam_mulai) == 5 else jam_mulai,
+                jam_selesai + ":00" if len(jam_selesai) == 5 else jam_selesai,
+                wilayah,
+                status
+            ))
+            jadwal_id = cursor.lastrowid
+
+            # ===== INSERT ke jadwal_petugas =====
+            for pid in petugas_ids:
+                cursor.execute(
+                    "INSERT INTO jadwal_petugas (jadwal_id, petugas_id) VALUES (%s, %s)",
+                    (jadwal_id, pid)
+                )
 
             conn.commit()
 
         return jsonify({
             "success": True,
             "message": f"Jadwal berhasil dibuat untuk {len(petugas_ids)} petugas",
-            "jadwal_ids": jadwal_ids
+            "jadwal_id": jadwal_id
         }), 201
 
     except Exception as e:
@@ -343,31 +316,153 @@ def create_jadwal_multi():
     finally:
         conn.close()
 
+
 @jadwal_bp.route('/list', methods=['GET'])
 def list_jadwal():
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
             sql = """
-                SELECT j.id, j.tanggal, j.jam_mulai, j.jam_selesai, j.wilayah,
-                       j.status, p.nama_petugas
+                SELECT j.id, 
+                       DATE_FORMAT(j.tanggal, '%Y-%m-%d') as tanggal,  # Format tanggal
+                       TIME_FORMAT(j.jam_mulai, '%H:%i:%s') as jam_mulai,
+                       TIME_FORMAT(j.jam_selesai, '%H:%i:%s') as jam_selesai,
+                       j.wilayah, j.status, 
+                       GROUP_CONCAT(p.nama_petugas SEPARATOR ', ') AS nama_petugas
                 FROM jadwal j
-                LEFT JOIN petugas p ON j.id_petugas = p.id
+                LEFT JOIN jadwal_petugas jp ON j.id = jp.jadwal_id
+                LEFT JOIN petugas p ON jp.petugas_id = p.id
+                GROUP BY j.id
                 ORDER BY j.tanggal DESC, j.jam_mulai ASC
             """
             cursor.execute(sql)
             rows = cursor.fetchall()
 
-            # convert jam ke string supaya JSON friendly
-            for r in rows:
-                if r.get('jam_mulai'):
-                    r['jam_mulai'] = str(r['jam_mulai'])
-                if r.get('jam_selesai'):
-                    r['jam_selesai'] = str(r['jam_selesai'])
-
         return jsonify({"success": True, "data": rows}), 200
     except Exception as e:
         print("list_jadwal error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+@jadwal_bp.route('/<int:jadwal_id>', methods=['GET'])
+def get_jadwal_by_id(jadwal_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Ambil data jadwal
+            sql = """
+                SELECT j.id, j.tanggal, j.jam_mulai, j.jam_selesai,
+                       j.wilayah, j.status
+                FROM jadwal j
+                WHERE j.id = %s
+            """
+            cursor.execute(sql, (jadwal_id,))
+            jadwal = cursor.fetchone()
+
+            if not jadwal:
+                return jsonify({"success": False, "message": "Data jadwal tidak ditemukan"}), 404
+
+            # Convert jam ke string
+            if jadwal.get('jam_mulai'):
+                jadwal['jam_mulai'] = str(jadwal['jam_mulai'])
+            if jadwal.get('jam_selesai'):
+                jadwal['jam_selesai'] = str(jadwal['jam_selesai'])
+
+            # Ambil daftar petugas dari jadwal_petugas
+            cursor.execute("SELECT petugas_id FROM jadwal_petugas WHERE jadwal_id = %s", (jadwal_id,))
+            petugas_rows = cursor.fetchall()
+            jadwal['petugas_ids'] = [r['petugas_id'] for r in petugas_rows]
+
+        return jsonify({"success": True, "data": jadwal}), 200
+    except Exception as e:
+        print("get_jadwal_by_id error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+
+
+@jadwal_bp.route('/<int:jadwal_id>', methods=['PATCH'])
+def update_jadwal(jadwal_id):
+    data = request.json or {}
+
+    tanggal = data.get('tanggal')
+    jam_mulai = data.get('jam_mulai')
+    jam_selesai = data.get('jam_selesai')
+    wilayah = data.get('wilayah')
+    status = data.get('status', 'aktif')
+    petugas_ids = data.get('petugas_ids', [])
+    
+     # Validasi tanggal
+    try:
+        datetime.strptime(tanggal, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"success": False, "message": "Format tanggal harus YYYY-MM-DD"}), 400
+
+    if not tanggal or not jam_mulai or not jam_selesai or not wilayah:
+        return jsonify({"success": False, "message": "tanggal, jam_mulai, jam_selesai, dan wilayah wajib diisi"}), 400
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Update data jadwal
+            sql_update = """
+                UPDATE jadwal
+                SET tanggal=%s, jam_mulai=%s, jam_selesai=%s, wilayah=%s, status=%s
+                WHERE id=%s
+            """
+            cursor.execute(sql_update, (
+                tanggal,
+                jam_mulai,
+                jam_selesai,
+                wilayah,
+                status,
+                jadwal_id
+            ))
+
+            # Hapus petugas lama di jadwal_petugas
+            cursor.execute("DELETE FROM jadwal_petugas WHERE jadwal_id=%s", (jadwal_id,))
+
+            # Insert petugas baru
+            for pid in petugas_ids:
+                cursor.execute("INSERT INTO jadwal_petugas (jadwal_id, petugas_id) VALUES (%s,%s)", (jadwal_id, pid))
+
+            conn.commit()
+
+        return jsonify({"success": True, "message": "Jadwal berhasil diperbarui"}), 200
+    except Exception as e:
+        conn.rollback()
+        print("update_jadwal error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+    finally:
+        conn.close()
+
+@jadwal_bp.route('/<int:jadwal_id>/toggle-status', methods=['PATCH'])
+def toggle_jadwal_status(jadwal_id):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Cek jadwal ada
+            cursor.execute("SELECT status FROM jadwal WHERE id = %s", (jadwal_id,))
+            jadwal = cursor.fetchone()
+            
+            if not jadwal:
+                return jsonify({"success": False, "message": "Jadwal tidak ditemukan"}), 404
+            
+            # Toggle status
+            new_status = 'nonaktif' if jadwal['status'] == 'aktif' else 'aktif'
+            
+            cursor.execute("UPDATE jadwal SET status = %s WHERE id = %s", (new_status, jadwal_id))
+            conn.commit()
+            
+        return jsonify({
+            "success": True,
+            "message": f"Status jadwal berhasil diubah menjadi {new_status}",
+            "new_status": new_status
+        }), 200
+        
+    except Exception as e:
+        conn.rollback()
+        print("toggle_jadwal_status error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()

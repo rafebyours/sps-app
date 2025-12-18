@@ -93,10 +93,11 @@ def get_laporan_by_id(laporan_id):
         conn.close()
 
 # ================== CREATE ==================
-@laporan_bp.route('/', methods=['POST'])
+# ================== CREATE ==================
+@laporan_bp.route('', methods=['POST'])
 def create_laporan():
     data = request.json or {}
-    id_warga = data.get('id_warga')
+    user_id = data.get('user_id')  # ganti dari id_warga ke user_id
     alamat = data.get('alamat')
     sudah_dipilah = data.get('sudah_dipilah', 0)
     jumlah_karung = data.get('jumlah_karung')
@@ -106,8 +107,8 @@ def create_laporan():
     jenis_sampah = data.get('jenis_sampah')
 
     # Validasi
-    if not id_warga:
-        return jsonify({"success": False, "message": "id_warga wajib diisi"}), 400
+    if not user_id:
+        return jsonify({"success": False, "message": "user_id wajib diisi"}), 400
     if jumlah_karung is None:
         return jsonify({"success": False, "message": "jumlah_karung wajib diisi"}), 400
     if not jenis_pembayaran:
@@ -134,12 +135,14 @@ def create_laporan():
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Ambil alamat dari warga jika tidak ada
+            # Ambil id_warga dari user_id
+            cursor.execute("SELECT id, alamat FROM warga WHERE user_id = %s", (user_id,))
+            warga = cursor.fetchone()
+            if not warga:
+                return jsonify({"success": False, "message": "Data warga tidak ditemukan"}), 404
+
+            id_warga = warga['id']
             if not alamat:
-                cursor.execute("SELECT alamat FROM warga WHERE id = %s", (id_warga,))
-                warga = cursor.fetchone()
-                if not warga:
-                    return jsonify({"success": False, "message": "Data warga tidak ditemukan"}), 404
                 alamat = warga['alamat']
 
             sql = """
