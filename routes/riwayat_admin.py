@@ -40,7 +40,7 @@ def get_all_riwayat():
                     id,
                     tanggal,
                     'Pengeluaran' AS type,
-                    CONCAT(jenis_pengeluaran, ' - ', nama_pengeluaran) AS description,
+                    CONCAT(kategori, ' - ', nama_pengeluaran) AS description,
                     jumlah_pengeluaran AS amount,
                     NULL AS jumlah_karung,
                     NULL AS nama_warga,

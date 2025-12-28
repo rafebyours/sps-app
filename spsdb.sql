@@ -130,7 +130,7 @@ CREATE TABLE `pemasukan` (
 
 CREATE TABLE `pengeluaran` (
   `id` int(11) NOT NULL,
-  `jenis_pengeluaran` enum('operasional','gaji','lainnya') DEFAULT NULL,
+  `kategori` enum('operasional','gaji','lainnya') DEFAULT NULL,
   `nama_pengeluaran` varchar(100) DEFAULT NULL,
   `jumlah_pengeluaran` float DEFAULT NULL,
   `tanggal` datetime DEFAULT current_timestamp()
