@@ -26,10 +26,13 @@ def after_request(response):
     return response
 
 # ================== GET ALL ==================
+# routes/laporan.py - perbaiki endpoint get_all_laporan
 @laporan_bp.route('/', methods=['GET'])
 def get_all_laporan():
     status = request.args.get('status')
     id_warga = request.args.get('id_warga')
+    tanggal = request.args.get('tanggal')  # <-- TAMBAHKAN INI
+
 
     conn = get_connection()
     try:
@@ -45,12 +48,23 @@ def get_all_laporan():
                 WHERE 1=1
             """
             params = []
+            
+            if tanggal:
+                sql += " AND DATE(l.jadwal_pengambilan) = %s"
+                params.append(tanggal)
+                
+                
             if status:
-                sql += " AND l.status = %s"
-                params.append(status)
+                # Support multiple status separated by comma
+                status_list = [s.strip() for s in status.split(',')]
+                placeholders = ','.join(['%s'] * len(status_list))
+                sql += f" AND l.status IN ({placeholders})"
+                params.extend(status_list)
+                
             if id_warga:
                 sql += " AND l.id_warga = %s"
                 params.append(id_warga)
+                
             sql += " ORDER BY l.created_at DESC"
 
             cursor.execute(sql, params)
