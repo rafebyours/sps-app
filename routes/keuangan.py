@@ -1,337 +1,532 @@
-# routes/keuangan.py (buat file baru)
-from flask import Blueprint, request, jsonify, make_response
+# routes/keuangan.py
+from flask import Blueprint, request, jsonify
 import pymysql
 from config import DB_CONFIG
-from datetime import datetime, date, timedelta
+from datetime import datetime
+import random
 
-keuangan_bp = Blueprint('keuangan', __name__, url_prefix='/api')
+keuangan_bp = Blueprint('keuangan', __name__, url_prefix='/api/keuangan')
 
 def get_connection():
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
 
-@keuangan_bp.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        response = make_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
-        return response
-
-@keuangan_bp.after_request
-def after_request(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
-    return response
-
-# Pemasukan Endpoints
 @keuangan_bp.route('/pemasukan', methods=['GET'])
-def get_all_pemasukan():
+def get_pemasukan():
+    """Get all pemasukan (jenis = 'pemasukan')"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
             sql = """
-                SELECT id, 
-                       DATE_FORMAT(tanggal, '%%Y-%%m-%%d') as tanggal,
-                       jumlah, kategori, keterangan,
-                       DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at
-                FROM pemasukan
+                SELECT 
+                    id,
+                    kode_transaksi,
+                    'pemasukan' as tipe,
+                    kategori,
+                    jumlah,
+                    keterangan,
+                    DATE(tanggal) as tanggal,
+                    DATE_FORMAT(tanggal, '%%Y-%%m-%%d') as tanggal_iso,
+                    DATE_FORMAT(tanggal, '%%W') as hari_en,
+                    status_bayar,
+                    metode_bayar
+                FROM transaksi 
+                WHERE jenis = 'pemasukan'
                 ORDER BY tanggal DESC
             """
+            
             cursor.execute(sql)
             rows = cursor.fetchall()
             
-        return jsonify({"success": True, "data": rows}), 200
+            # Convert English day names to Indonesian
+            days_map = {
+                'Monday': 'Senin', 'Tuesday': 'Selasa', 'Wednesday': 'Rabu',
+                'Thursday': 'Kamis', 'Friday': 'Jumat', 'Saturday': 'Sabtu',
+                'Sunday': 'Minggu'
+            }
+            
+            for row in rows:
+                # Format hari
+                if row.get('hari_en'):
+                    row['hari'] = days_map.get(row['hari_en'], row['hari_en'])
+                else:
+                    row['hari'] = ''
+                
+                # Remove hari_en
+                if 'hari_en' in row:
+                    del row['hari_en']
+                
+                # Ensure tanggal is string
+                if 'tanggal' in row and row['tanggal']:
+                    row['tanggal'] = str(row['tanggal'])
+            
+            return jsonify({
+                "success": True,
+                "data": rows,
+                "message": f"Found {len(rows)} pemasukan records"
+            }), 200
+            
     except Exception as e:
-        print("get_all_pemasukan error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
+        print(f"Error in get_pemasukan: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal mengambil data pemasukan",
+            "error": str(e)
+        }), 500
+    finally:
+        conn.close()
+
+@keuangan_bp.route('/pengeluaran', methods=['GET'])
+def get_pengeluaran():
+    """Get all pengeluaran (jenis = 'pengeluaran' OR 'gaji')"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+                SELECT 
+                    id,
+                    kode_transaksi,
+                    jenis as tipe,
+                    kategori,
+                    jumlah,
+                    keterangan,
+                    DATE(tanggal) as tanggal,
+                    DATE_FORMAT(tanggal, '%%Y-%%m-%%d') as tanggal_iso,
+                    DATE_FORMAT(tanggal, '%%W') as hari_en,
+                    status_bayar,
+                    metode_bayar
+                FROM transaksi 
+                WHERE jenis IN ('pengeluaran', 'gaji')
+                ORDER BY tanggal DESC
+            """
+            
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            
+            # Convert English day names to Indonesian
+            days_map = {
+                'Monday': 'Senin', 'Tuesday': 'Selasa', 'Wednesday': 'Rabu',
+                'Thursday': 'Kamis', 'Friday': 'Jumat', 'Saturday': 'Sabtu',
+                'Sunday': 'Minggu'
+            }
+            
+            for row in rows:
+                # Format hari
+                if row.get('hari_en'):
+                    row['hari'] = days_map.get(row['hari_en'], row['hari_en'])
+                else:
+                    row['hari'] = ''
+                
+                # Remove hari_en
+                if 'hari_en' in row:
+                    del row['hari_en']
+                
+                # Ensure tanggal is string
+                if 'tanggal' in row and row['tanggal']:
+                    row['tanggal'] = str(row['tanggal'])
+            
+            return jsonify({
+                "success": True,
+                "data": rows,
+                "message": f"Found {len(rows)} pengeluaran records"
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_pengeluaran: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal mengambil data pengeluaran",
+            "error": str(e)
+        }), 500
     finally:
         conn.close()
 
 @keuangan_bp.route('/pemasukan', methods=['POST'])
 def create_pemasukan():
-    data = request.json or {}
+    """Create new pemasukan"""
+    data = request.get_json()
     
-    tanggal = data.get('tanggal')
-    jumlah = data.get('jumlah')
-    kategori = data.get('kategori')
-    keterangan = data.get('keterangan', '')
-    
-    if not all([tanggal, jumlah, kategori, keterangan]):
-        return jsonify({"success": False, "message": "Semua field wajib diisi"}), 400
+    required_fields = ['tanggal', 'jumlah', 'kategori', 'keterangan']
+    for field in required_fields:
+        if not data.get(field):
+            return jsonify({
+                "success": False,
+                "message": f"Field '{field}' wajib diisi"
+            }), 400
     
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
+            # Generate kode transaksi untuk PEMASUKAN
+            kode = f"PM-{datetime.now().strftime('%y%m%d')}-{random.randint(1000, 9999)}"
+            
+            # Insert into transaksi table
             sql = """
-                INSERT INTO pemasukan (tanggal, jumlah, kategori, keterangan)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO transaksi (
+                    kode_transaksi,
+                    jenis,
+                    kategori,
+                    jumlah,
+                    keterangan,
+                    tanggal,
+                    status_bayar,
+                    metode_bayar,
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
-            cursor.execute(sql, (tanggal, jumlah, kategori, keterangan))
+            
+            cursor.execute(sql, (
+                kode,
+                'pemasukan',
+                data['kategori'],
+                float(data['jumlah']),
+                data['keterangan'],
+                data['tanggal'],
+                data.get('status_bayar', 'lunas'),
+                data.get('metode_bayar', 'cash'),
+            ))
+            
             conn.commit()
             
-            pemasukan_id = cursor.lastrowid
+            return jsonify({
+                "success": True,
+                "message": "Pemasukan berhasil ditambahkan",
+                "data": {
+                    "id": cursor.lastrowid,
+                    "kode_transaksi": kode
+                }
+            }), 201
             
-        return jsonify({
-            "success": True,
-            "message": "Pemasukan berhasil ditambahkan",
-            "id": pemasukan_id
-        }), 201
     except Exception as e:
         conn.rollback()
-        print("create_pemasukan error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
+        print(f"Error in create_pemasukan: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal menambah pemasukan",
+            "error": str(e)
+        }), 500
+    finally:
+        conn.close()
+
+@keuangan_bp.route('/pengeluaran', methods=['POST'])
+def create_pengeluaran():
+    """Create new pengeluaran"""
+    data = request.get_json()
+    
+    required_fields = ['tanggal', 'jumlah', 'kategori', 'keterangan']
+    for field in required_fields:
+        if not data.get(field):
+            return jsonify({
+                "success": False,
+                "message": f"Field '{field}' wajib diisi"
+            }), 400
+    
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Generate kode transaksi untuk PENGELUARAN
+            kode = f"PL-{datetime.now().strftime('%y%m%d')}-{random.randint(1000, 9999)}"
+            
+            # Determine jenis based on kategori
+            jenis = 'gaji' if data['kategori'] == 'Gaji Petugas' else 'pengeluaran'
+            
+            # Insert into transaksi table
+            sql = """
+                INSERT INTO transaksi (
+                    kode_transaksi,
+                    jenis,
+                    kategori,
+                    jumlah,
+                    keterangan,
+                    tanggal,
+                    status_bayar,
+                    metode_bayar,
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            cursor.execute(sql, (
+                kode,
+                jenis,
+                data['kategori'],
+                float(data['jumlah']),
+                data['keterangan'],
+                data['tanggal'],
+                data.get('status_bayar', 'lunas'),
+                data.get('metode_bayar', 'cash'),
+            ))
+            
+            conn.commit()
+            
+            return jsonify({
+                "success": True,
+                "message": "Pengeluaran berhasil ditambahkan",
+                "data": {
+                    "id": cursor.lastrowid,
+                    "kode_transaksi": kode
+                }
+            }), 201
+            
+    except Exception as e:
+        conn.rollback()
+        print(f"Error in create_pengeluaran: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal menambah pengeluaran",
+            "error": str(e)
+        }), 500
     finally:
         conn.close()
 
 @keuangan_bp.route('/pemasukan/<int:id>', methods=['PUT'])
 def update_pemasukan(id):
-    data = request.json or {}
-    
-    tanggal = data.get('tanggal')
-    jumlah = data.get('jumlah')
-    kategori = data.get('kategori')
-    keterangan = data.get('keterangan', '')
-    
-    if not all([tanggal, jumlah, kategori, keterangan]):
-        return jsonify({"success": False, "message": "Semua field wajib diisi"}), 400
+    """Update pemasukan"""
+    data = request.get_json()
     
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Cek apakah data ada
-            cursor.execute("SELECT id FROM pemasukan WHERE id = %s", (id,))
-            if not cursor.fetchone():
-                return jsonify({"success": False, "message": "Data tidak ditemukan"}), 404
-            
             sql = """
-                UPDATE pemasukan 
-                SET tanggal = %s, jumlah = %s, kategori = %s, keterangan = %s
-                WHERE id = %s
+                UPDATE transaksi 
+                SET kategori = %s,
+                    jumlah = %s,
+                    keterangan = %s,
+                    tanggal = %s,
+                    status_bayar = %s,
+                    metode_bayar = %s
+                WHERE id = %s AND jenis = 'pemasukan'
             """
-            cursor.execute(sql, (tanggal, jumlah, kategori, keterangan, id))
+            
+            cursor.execute(sql, (
+                data['kategori'],
+                float(data['jumlah']),
+                data['keterangan'],
+                data['tanggal'],
+                data.get('status_bayar', 'lunas'),
+                data.get('metode_bayar', 'cash'),
+                id
+            ))
+            
             conn.commit()
             
-        return jsonify({
-            "success": True,
-            "message": "Pemasukan berhasil diperbarui"
-        }), 200
+            if cursor.rowcount == 0:
+                return jsonify({
+                    "success": False,
+                    "message": "Pemasukan tidak ditemukan"
+                }), 404
+            
+            return jsonify({
+                "success": True,
+                "message": "Pemasukan berhasil diperbarui"
+            }), 200
+            
     except Exception as e:
         conn.rollback()
-        print("update_pemasukan error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
+        print(f"Error in update_pemasukan: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal memperbarui pemasukan",
+            "error": str(e)
+        }), 500
+    finally:
+        conn.close()
+
+@keuangan_bp.route('/pengeluaran/<int:id>', methods=['PUT'])
+def update_pengeluaran(id):
+    """Update pengeluaran"""
+    data = request.get_json()
+    
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Determine jenis based on kategori
+            jenis = 'gaji' if data['kategori'] == 'Gaji Petugas' else 'pengeluaran'
+            
+            sql = """
+                UPDATE transaksi 
+                SET kategori = %s,
+                    jumlah = %s,
+                    keterangan = %s,
+                    tanggal = %s,
+                    jenis = %s,
+                    status_bayar = %s,
+                    metode_bayar = %s
+                WHERE id = %s AND jenis IN ('pengeluaran', 'gaji')
+            """
+            
+            cursor.execute(sql, (
+                data['kategori'],
+                float(data['jumlah']),
+                data['keterangan'],
+                data['tanggal'],
+                jenis,
+                data.get('status_bayar', 'lunas'),
+                data.get('metode_bayar', 'cash'),
+                id
+            ))
+            
+            conn.commit()
+            
+            if cursor.rowcount == 0:
+                return jsonify({
+                    "success": False,
+                    "message": "Pengeluaran tidak ditemukan"
+                }), 404
+            
+            return jsonify({
+                "success": True,
+                "message": "Pengeluaran berhasil diperbarui"
+            }), 200
+            
+    except Exception as e:
+        conn.rollback()
+        print(f"Error in update_pengeluaran: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal memperbarui pengeluaran",
+            "error": str(e)
+        }), 500
     finally:
         conn.close()
 
 @keuangan_bp.route('/pemasukan/<int:id>', methods=['DELETE'])
 def delete_pemasukan(id):
+    """Delete pemasukan"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Cek apakah data ada
-            cursor.execute("SELECT id FROM pemasukan WHERE id = %s", (id,))
-            if not cursor.fetchone():
-                return jsonify({"success": False, "message": "Data tidak ditemukan"}), 404
-            
-            cursor.execute("DELETE FROM pemasukan WHERE id = %s", (id,))
+            sql = "DELETE FROM transaksi WHERE id = %s AND jenis = 'pemasukan'"
+            cursor.execute(sql, (id,))
             conn.commit()
             
-        return jsonify({
-            "success": True,
-            "message": "Pemasukan berhasil dihapus"
-        }), 200
+            if cursor.rowcount == 0:
+                return jsonify({
+                    "success": False,
+                    "message": "Pemasukan tidak ditemukan"
+                }), 404
+            
+            return jsonify({
+                "success": True,
+                "message": "Pemasukan berhasil dihapus"
+            }), 200
+            
     except Exception as e:
         conn.rollback()
-        print("delete_pemasukan error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
-        conn.close()
-
-# Pengeluaran Endpoints (sama seperti pemasukan, tinggal copy dan modifikasi tabelnya)
-# Pengeluaran Endpoints (sama seperti pemasukan)
-@keuangan_bp.route('/pengeluaran', methods=['POST'])
-def create_pengeluaran():
-    data = request.json or {}
-    
-    tanggal = data.get('tanggal')
-    jumlah = data.get('jumlah')
-    kategori = data.get('kategori')
-    keterangan = data.get('keterangan', '')
-    
-    if not all([tanggal, jumlah, kategori, keterangan]):
-        return jsonify({"success": False, "message": "Semua field wajib diisi"}), 400
-    
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            sql = """
-                INSERT INTO pengeluaran (tanggal, jumlah, kategori, keterangan)
-                VALUES (%s, %s, %s, %s)
-            """
-            cursor.execute(sql, (tanggal, jumlah, kategori, keterangan))
-            conn.commit()
-            
-            pengeluaran_id = cursor.lastrowid
-            
+        print(f"Error in delete_pemasukan: {e}")
         return jsonify({
-            "success": True,
-            "message": "Pengeluaran berhasil ditambahkan",
-            "id": pengeluaran_id
-        }), 201
-    except Exception as e:
-        conn.rollback()
-        print("create_pengeluaran error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
-        conn.close()
-
-@keuangan_bp.route('/pengeluaran', methods=['GET'])
-def get_all_pengeluaran():
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            sql = """
-                SELECT id, 
-                       DATE_FORMAT(tanggal, '%%Y-%%m-%%d') as tanggal,
-                       jumlah, kategori, keterangan,
-                       DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') as created_at
-                FROM pengeluaran
-                ORDER BY tanggal DESC
-            """
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            
-        return jsonify({"success": True, "data": rows}), 200
-    except Exception as e:
-        print("get_all_pengeluaran error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
-        conn.close()
-        
-@keuangan_bp.route('/pengeluaran/<int:id>', methods=['PUT'])
-def update_pengeluaran(id):
-    data = request.json or {}
-    
-    tanggal = data.get('tanggal')
-    jumlah = data.get('jumlah')
-    kategori = data.get('kategori')
-    keterangan = data.get('keterangan', '')
-    
-    if not all([tanggal, jumlah, kategori, keterangan]):
-        return jsonify({"success": False, "message": "Semua field wajib diisi"}), 400
-    
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            # Cek apakah data ada
-            cursor.execute("SELECT id FROM pengeluaran WHERE id = %s", (id,))
-            if not cursor.fetchone():
-                return jsonify({"success": False, "message": "Data tidak ditemukan"}), 404
-            
-            sql = """
-                UPDATE pengeluaran 
-                SET tanggal = %s, jumlah = %s, kategori = %s, keterangan = %s
-                WHERE id = %s
-            """
-            cursor.execute(sql, (tanggal, jumlah, kategori, keterangan, id))
-            conn.commit()
-            
-        return jsonify({
-            "success": True,
-            "message": "Pengeluaran berhasil diperbarui"
-        }), 200
-    except Exception as e:
-        conn.rollback()
-        print("update_pengeluaran error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
+            "success": False,
+            "message": "Gagal menghapus pemasukan",
+            "error": str(e)
+        }), 500
     finally:
         conn.close()
 
 @keuangan_bp.route('/pengeluaran/<int:id>', methods=['DELETE'])
 def delete_pengeluaran(id):
+    """Delete pengeluaran"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Cek apakah data ada
-            cursor.execute("SELECT id FROM pengeluaran WHERE id = %s", (id,))
-            if not cursor.fetchone():
-                return jsonify({"success": False, "message": "Data tidak ditemukan"}), 404
-            
-            cursor.execute("DELETE FROM pengeluaran WHERE id = %s", (id,))
+            sql = "DELETE FROM transaksi WHERE id = %s AND jenis IN ('pengeluaran', 'gaji')"
+            cursor.execute(sql, (id,))
             conn.commit()
             
-        return jsonify({
-            "success": True,
-            "message": "Pengeluaran berhasil dihapus"
-        }), 200
+            if cursor.rowcount == 0:
+                return jsonify({
+                    "success": False,
+                    "message": "Pengeluaran tidak ditemukan"
+                }), 404
+            
+            return jsonify({
+                "success": True,
+                "message": "Pengeluaran berhasil dihapus"
+            }), 200
+            
     except Exception as e:
         conn.rollback()
-        print("delete_pengeluaran error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
+        print(f"Error in delete_pengeluaran: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal menghapus pengeluaran",
+            "error": str(e)
+        }), 500
     finally:
         conn.close()
 
-# Stats Endpoint
-@keuangan_bp.route('/keuangan/stats', methods=['GET'])
-def get_keuangan_stats():
+@keuangan_bp.route('/summary', methods=['GET'])
+def get_keuangan_summary():
+    """Get financial summary"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Total pemasukan bulan ini
-            current_month = date.today().strftime('%Y-%m')
-            sql_pemasukan = """
-                SELECT COALESCE(SUM(jumlah), 0) as total
-                FROM pemasukan
-                WHERE DATE_FORMAT(tanggal, '%%Y-%%m') = %s
-            """
-            cursor.execute(sql_pemasukan, (current_month,))
-            total_pemasukan = cursor.fetchone()['total']
+            # Total pemasukan
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_transaksi,
+                    SUM(jumlah) as total_jumlah
+                FROM transaksi 
+                WHERE jenis = 'pemasukan'
+            """)
+            pemasukan = cursor.fetchone()
             
-            # Total pengeluaran bulan ini
-            sql_pengeluaran = """
-                SELECT COALESCE(SUM(jumlah), 0) as total
-                FROM pengeluaran
-                WHERE DATE_FORMAT(tanggal, '%%Y-%%m') = %s
-            """
-            cursor.execute(sql_pengeluaran, (current_month,))
-            total_pengeluaran = cursor.fetchone()['total']
+            # Total pengeluaran
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_transaksi,
+                    SUM(jumlah) as total_jumlah
+                FROM transaksi 
+                WHERE jenis IN ('pengeluaran', 'gaji')
+            """)
+            pengeluaran = cursor.fetchone()
             
-            # Saldo
-            saldo = total_pemasukan - total_pengeluaran
+            # This month
+            cursor.execute("""
+                SELECT 
+                    SUM(CASE WHEN jenis = 'pemasukan' THEN jumlah ELSE 0 END) as pemasukan_bulan_ini,
+                    SUM(CASE WHEN jenis IN ('pengeluaran', 'gaji') THEN jumlah ELSE 0 END) as pengeluaran_bulan_ini
+                FROM transaksi 
+                WHERE MONTH(tanggal) = MONTH(CURDATE())
+                AND YEAR(tanggal) = YEAR(CURDATE())
+            """)
+            bulan_ini = cursor.fetchone()
             
-            # 5 pemasukan terbaru
-            sql_recent_pemasukan = """
-                SELECT id, tanggal, jumlah, kategori, keterangan
-                FROM pemasukan
-                ORDER BY tanggal DESC
+            # Today
+            cursor.execute("""
+                SELECT 
+                    SUM(CASE WHEN jenis = 'pemasukan' THEN jumlah ELSE 0 END) as pemasukan_hari_ini,
+                    SUM(CASE WHEN jenis IN ('pengeluaran', 'gaji') THEN jumlah ELSE 0 END) as pengeluaran_hari_ini
+                FROM transaksi 
+                WHERE DATE(tanggal) = CURDATE()
+            """)
+            hari_ini = cursor.fetchone()
+            
+            # Categories summary
+            cursor.execute("""
+                SELECT 
+                    kategori,
+                    COUNT(*) as jumlah,
+                    SUM(jumlah) as total
+                FROM transaksi 
+                WHERE jenis IN ('pengeluaran', 'gaji')
+                GROUP BY kategori
+                ORDER BY total DESC
                 LIMIT 5
-            """
-            cursor.execute(sql_recent_pemasukan)
-            recent_pemasukan = cursor.fetchall()
+            """)
+            kategori_pengeluaran = cursor.fetchall()
             
-            # 5 pengeluaran terbaru
-            sql_recent_pengeluaran = """
-                SELECT id, tanggal, jumlah, kategori, keterangan
-                FROM pengeluaran
-                ORDER BY tanggal DESC
-                LIMIT 5
-            """
-            cursor.execute(sql_recent_pengeluaran)
-            recent_pengeluaran = cursor.fetchall()
+            return jsonify({
+                "success": True,
+                "data": {
+                    "pemasukan": pemasukan or {"total_transaksi": 0, "total_jumlah": 0},
+                    "pengeluaran": pengeluaran or {"total_transaksi": 0, "total_jumlah": 0},
+                    "bulan_ini": bulan_ini or {"pemasukan_bulan_ini": 0, "pengeluaran_bulan_ini": 0},
+                    "hari_ini": hari_ini or {"pemasukan_hari_ini": 0, "pengeluaran_hari_ini": 0},
+                    "kategori_pengeluaran": kategori_pengeluaran
+                }
+            }), 200
             
-        return jsonify({
-            "success": True,
-            "data": {
-                "total_pemasukan": float(total_pemasukan),
-                "total_pengeluaran": float(total_pengeluaran),
-                "saldo": float(saldo),
-                "recent_pemasukan": recent_pemasukan,
-                "recent_pengeluaran": recent_pengeluaran
-            }
-        }), 200
     except Exception as e:
-        print("get_keuangan_stats error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
+        print(f"Error in get_keuangan_summary: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal mengambil summary keuangan"
+        }), 500
     finally:
         conn.close()
