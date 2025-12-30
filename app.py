@@ -18,7 +18,13 @@ from routes.log import log_bp
 from routes.dashboard import dashboard_bp
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "http://localhost:9000",
+        "supports_credentials": True
+    }
+})
+
 
 app.config['DB_CONFIG'] = DB_CONFIG
 

@@ -66,19 +66,20 @@ def get_today_jadwal_user():
         with conn.cursor() as cursor:
             sql = """
                 SELECT j.id, 
-                       DATE_FORMAT(j.tanggal, '%Y-%m-%d') as tanggal,
-                       TIME_FORMAT(j.jam_mulai, '%H:%i:%s') as jam_mulai,
-                       TIME_FORMAT(j.jam_selesai, '%H:%i:%s') as jam_selesai,
-                       j.wilayah, j.status,
-                       GROUP_CONCAT(p.nama_lengkap SEPARATOR ', ') AS nama_petugas  # <-- PERUBAHAN DI SINI
+                    DATE_FORMAT(j.tanggal, '%%Y-%%m-%%d') as tanggal,
+                    TIME_FORMAT(j.jam_mulai, '%%H:%%i:%%s') as jam_mulai,
+                    TIME_FORMAT(j.jam_selesai, '%%H:%%i:%%s') as jam_selesai,
+                    j.wilayah, j.status,
+                    GROUP_CONCAT(p.nama_lengkap SEPARATOR ', ') AS nama_petugas
                 FROM jadwal j
                 LEFT JOIN jadwal_petugas jp ON j.id = jp.jadwal_id
                 LEFT JOIN petugas p ON jp.petugas_id = p.id
                 WHERE j.tanggal = %s
-                  AND j.status = 'aktif'
+                AND j.status = 'aktif'
                 GROUP BY j.id
                 ORDER BY j.jam_mulai ASC
             """
+
             cursor.execute(sql, (today,))
             rows = cursor.fetchall()
 
@@ -142,11 +143,11 @@ def get_next_week_jadwal():
         with conn.cursor() as cursor:
             sql = """
                 SELECT j.id, 
-                       DATE_FORMAT(j.tanggal, '%Y-%m-%d') as tanggal,
-                       TIME_FORMAT(j.jam_mulai, '%H:%i:%s') as jam_mulai,
-                       TIME_FORMAT(j.jam_selesai, '%H:%i:%s') as jam_selesai,
-                       j.wilayah, j.status,
-                       GROUP_CONCAT(p.nama_lengkap SEPARATOR ', ') AS nama_petugas  # <-- PERUBAHAN DI SINI
+                    DATE_FORMAT(j.tanggal, '%%Y-%%m-%%d') as tanggal,
+                    TIME_FORMAT(j.jam_mulai, '%%H:%%i:%%s') as jam_mulai,
+                    TIME_FORMAT(j.jam_selesai, '%%H:%%i:%%s') as jam_selesai,
+                    j.wilayah, j.status,
+                    GROUP_CONCAT(p.nama_lengkap SEPARATOR ', ') AS nama_petugas
                 FROM jadwal j
                 LEFT JOIN jadwal_petugas jp ON j.id = jp.jadwal_id
                 LEFT JOIN petugas p ON jp.petugas_id = p.id
@@ -154,6 +155,7 @@ def get_next_week_jadwal():
                 GROUP BY j.id
                 ORDER BY j.tanggal ASC, j.jam_mulai ASC
             """
+
 
             cursor.execute(sql, (today, week_ahead))
             rows = cursor.fetchall()
@@ -477,8 +479,82 @@ def delete_jadwal(jadwal_id):
     finally:
         conn.close()
 
-# TIDAK PERLU FUNGSI INI LAGI KARENA SUDAH ADA DI ATAS:
-# @jadwal_bp.route('/today', methods=['GET'])
-# def get_today_jadwal_user():
-#     # HAPUS SEMUA KODE INI
+# routes/jadwal.py - Tambah endpoint baru
+@jadwal_bp.route('/upcoming/warga/<int:warga_id>', methods=['GET'])
+def get_upcoming_jadwal_warga(warga_id):
+    """Get upcoming schedules for specific warga (based on wilayah)"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # 1. Get wilayah warga
+            cursor.execute("SELECT alamat, wilayah FROM warga WHERE id = %s", (warga_id,))
+            warga = cursor.fetchone()
+            
+            if not warga:
+                return jsonify({"success": False, "message": "Warga tidak ditemukan"}), 404
+            
+            # 2. Get jadwal untuk wilayah warga (7 hari ke depan)
+            cursor.execute("""
+                SELECT 
+                    j.id,
+                    j.wilayah,
+                    j.tanggal,
+                    DATE_FORMAT(j.jam_mulai, '%%H:%%i') as jam_mulai,
+                    DATE_FORMAT(j.jam_selesai, '%%H:%%i') as jam_selesai,
+                    j.keterangan,
+                    j.status,
+                    p.nama_lengkap as nama_petugas,
+                    COUNT(l.id) as jumlah_pengajuan
+                FROM jadwal j
+                LEFT JOIN petugas p ON j.petugas_id = p.id
+                LEFT JOIN laporan l ON j.id = l.id_jadwal 
+                    AND l.id_warga = %s
+                    AND l.status IN ('menunggu', 'diproses')
+                WHERE j.wilayah = %s
+                AND j.tanggal >= CURDATE()
+                AND j.tanggal <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+                AND (j.status = 'aktif' OR j.status IS NULL)
+                GROUP BY j.id
+                ORDER BY j.tanggal ASC, j.jam_mulai ASC
+            """, (warga_id, warga['wilayah']))
+            
+            jadwal_list = cursor.fetchall()
+            
+            # Format tanggal
+            for jadwal in jadwal_list:
+                jadwal['tanggal_formatted'] = format_date_display(jadwal['tanggal'])
+                jadwal['is_today'] = str(jadwal['tanggal']) == datetime.now().strftime('%Y-%m-%d')
+                jadwal['is_tomorrow'] = str(jadwal['tanggal']) == (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+                
+            return jsonify({
+                "success": True,
+                "data": jadwal_list,
+                "message": f"Found {len(jadwal_list)} upcoming schedules"
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_upcoming_jadwal_warga: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        conn.close()
 
+def format_date_display(date_str):
+    """Format date untuk display"""
+    if not date_str:
+        return ""
+    try:
+        date_obj = datetime.strptime(str(date_str), '%Y-%m-%d')
+        
+        # Hari ini
+        if date_obj.date() == datetime.now().date():
+            return "Hari Ini"
+        # Besok
+        elif date_obj.date() == (datetime.now() + timedelta(days=1)).date():
+            return "Besok"
+        # Lainnya
+        else:
+            days = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu']
+            day_name = days[date_obj.weekday()]
+            return f"{day_name}, {date_obj.strftime('%d %B')}"
+    except:
+        return str(date_str)

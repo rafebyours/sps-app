@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, make_response
 import pymysql
 from config import DB_CONFIG
 import jwt
@@ -21,9 +21,13 @@ def get_connection():
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+
+        # ✅ PENTING: BIAR CORS OPTIONS LOLOS
+        if request.method == 'OPTIONS':
+            return make_response('', 200)
+
         token = None
         
-        # Check if token is in the header
         if 'Authorization' in request.headers:
             auth_header = request.headers['Authorization']
             try:
@@ -35,14 +39,13 @@ def token_required(f):
             return jsonify({'message': 'Token is missing!'}), 401
         
         try:
-            # Decode token
             data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
             current_user = data
         except jwt.ExpiredSignatureError:
             return jsonify({'message': 'Token has expired!'}), 401
         except jwt.InvalidTokenError:
             return jsonify({'message': 'Invalid token!'}), 401
-        except Exception as e:
+        except Exception:
             return jsonify({'message': 'Token verification failed!'}), 401
         
         return f(current_user, *args, **kwargs)

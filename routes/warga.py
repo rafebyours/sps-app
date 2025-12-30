@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, make_response
 import pymysql
 from config import DB_CONFIG
 import re
@@ -9,6 +9,23 @@ warga_bp = Blueprint('warga', __name__, url_prefix='/api/warga')
 
 def get_connection():
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
+
+# CORS Middleware
+@warga_bp.before_request
+def handle_options():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        return response
+
+@warga_bp.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    return response
 
 # Helper function untuk validasi warga
 def validate_warga_data(data, is_update=False):
@@ -92,10 +109,10 @@ def get_all_warga(current_user):
         for warga in warga_list:
             formatted_data.append({
                 'id': warga['id'],
-                'nama_warga': warga['nama_lengkap'],
+                'nama_lengkap': warga['nama_lengkap'],
                 'nik': warga['nik'],
                 'no_telp': warga['no_telepon'],
-                'alamat': warga['alamat_lengkap'],
+                'alamat_lengkap': warga['alamat_lengkap'],
                 'rt': warga['rt'],
                 'rw': warga['rw'],
                 'kelurahan': warga['kelurahan'] or 'Suraja',
@@ -287,10 +304,10 @@ def create_warga(current_user):
                 'message': 'Warga berhasil ditambahkan',
                 'data': {
                     'id': new_warga['id'],
-                    'nama_warga': new_warga['nama_lengkap'],
+                    'nama_lengkap': new_warga['nama_lengkap'],
                     'nik': new_warga['nik'],
                     'no_telp': new_warga['no_telepon'],
-                    'alamat': new_warga['alamat_lengkap'],
+                    'alamat_lengkap': new_warga['alamat_lengkap'],
                     'rt': new_warga['rt'],
                     'rw': new_warga['rw'],
                     'kelurahan': new_warga['kelurahan'],
@@ -474,10 +491,10 @@ def update_warga(current_user, id):
                 'message': 'Warga berhasil diperbarui',
                 'data': {
                     'id': updated_warga['id'],
-                    'nama_warga': updated_warga['nama_lengkap'],
+                    'nama_lengkap': updated_warga['nama_lengkap'],
                     'nik': updated_warga['nik'],
                     'no_telp': updated_warga['no_telepon'],
-                    'alamat': updated_warga['alamat_lengkap'],
+                    'alamat_lengkap': updated_warga['alamat_lengkap'],
                     'rt': updated_warga['rt'],
                     'rw': updated_warga['rw'],
                     'kelurahan': updated_warga['kelurahan'],
@@ -660,7 +677,7 @@ def search_warga(current_user):
         for warga in results:
             formatted_results.append({
                 'id': warga['id'],
-                'nama_warga': warga['nama_lengkap'],
+                'nama_lengkap': warga['nama_lengkap'],
                 'no_telp': warga['no_telepon'],
                 'rt': warga['rt'],
                 'rw': warga['rw'],
@@ -732,3 +749,43 @@ def topup_saldo(current_user, id):
             'success': False,
             'message': 'Terjadi kesalahan saat topup saldo'
         }), 500
+        
+@warga_bp.route('/by-user/<int:user_id>', methods=['GET'])
+def get_warga_by_user_id(user_id):
+    """Get warga data by user_id"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            sql = """
+                SELECT 
+                    id,
+                    nama_lengkap,
+                    alamat_lengkap,
+                    no_telepon,
+                    user_id
+                FROM warga 
+                WHERE user_id = %s
+            """
+            cursor.execute(sql, (user_id,))
+            warga = cursor.fetchone()
+            
+            if not warga:
+                return jsonify({
+                    "success": False,
+                    "message": "Data warga tidak ditemukan"
+                }), 404
+            
+            return jsonify({
+                "success": True,
+                "data": warga,
+                "message": "Data warga ditemukan"
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_warga_by_user_id: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal mengambil data warga"
+        }), 500
+    finally:
+        conn.close()

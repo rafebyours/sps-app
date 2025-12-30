@@ -1,232 +1,529 @@
 from flask import Blueprint, request, jsonify, make_response
 import pymysql
 from config import DB_CONFIG
+import re
 from datetime import datetime
+from werkzeug.security import generate_password_hash
+from .auth import token_required
+import uuid
 
+# Definisikan blueprint TERLEBIH DAHULU
 laporan_bp = Blueprint('laporan', __name__, url_prefix='/api/laporan')
 
 def get_connection():
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
 
-# ====== Handle CORS untuk semua request ======
-@laporan_bp.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        response = make_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
-        return response
-
-@laporan_bp.after_request
-def after_request(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
-    return response
-
-# ================== GET ALL ==================
-# routes/laporan.py - perbaiki endpoint get_all_laporan
-@laporan_bp.route('/', methods=['GET'])
-def get_all_laporan():
-    status = request.args.get('status')
-    id_warga = request.args.get('id_warga')
-    tanggal = request.args.get('tanggal')  # <-- TAMBAHKAN INI
+# CORS Middleware
 
 
+# Helper function untuk generate kode laporan
+def generate_kode_laporan():
+    # Format: LAP-YYMMDD-XXX
+    now = datetime.now()
+    date_str = now.strftime('%y%m%d')
+    
     conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            sql = """
-                SELECT l.id, l.id_warga, w.nama_warga,
-                       l.alamat, l.sudah_dipilah,
-                       l.jumlah_karung, l.jenis_sampah, l.jenis_pembayaran,
-                       l.jadwal_pengambilan, l.status,
-                       l.created_at
-                FROM laporan_sampah l
-                JOIN warga w ON l.id_warga = w.id
-                WHERE 1=1
-            """
-            params = []
-            
-            if tanggal:
-                sql += " AND DATE(l.jadwal_pengambilan) = %s"
-                params.append(tanggal)
-                
-                
-            if status:
-                # Support multiple status separated by comma
-                status_list = [s.strip() for s in status.split(',')]
-                placeholders = ','.join(['%s'] * len(status_list))
-                sql += f" AND l.status IN ({placeholders})"
-                params.extend(status_list)
-                
-            if id_warga:
-                sql += " AND l.id_warga = %s"
-                params.append(id_warga)
-                
-            sql += " ORDER BY l.created_at DESC"
+    cursor = conn.cursor()
+    
+    # Cari sequence untuk hari ini
+    cursor.execute("""
+        SELECT COUNT(*) as count 
+        FROM laporan 
+        WHERE DATE(tanggal_laporan) = CURDATE()
+    """)
+    result = cursor.fetchone()
+    sequence = result['count'] + 1 if result else 1
+    
+    conn.close()
+    
+    return f"LAP-{date_str}-{str(sequence).zfill(3)}"
 
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
+# Helper function untuk validasi data laporan
+def validate_laporan_data(data):
+    errors = []
+    
+    # Validasi id_jadwal
+    if not data.get('id_jadwal'):
+        errors.append("ID jadwal wajib diisi")
+    
+    # Validasi id_warga
+    if not data.get('id_warga'):
+        errors.append("ID warga wajib diisi")
+    
+    # Validasi jenis sampah
+    if not data.get('jenis_sampah') or len(data['jenis_sampah'].strip()) == 0:
+        errors.append("Jenis sampah wajib diisi")
+    
+    # Validasi alamat
+    if not data.get('alamat_detail') or len(data['alamat_detail'].strip()) < 10:
+        errors.append("Alamat detail minimal 10 karakter")
+    
+    # Validasi nomor HP
+    nomor_hp = data.get('nomor_hp', '')
+    if nomor_hp and not re.match(r'^[0-9]{10,14}$', nomor_hp):
+        errors.append("Nomor HP tidak valid (10-14 digit)")
+    
+    # Validasi nama pemohon
+    if not data.get('nama_pemohon') or len(data['nama_pemohon'].strip()) < 2:
+        errors.append("Nama pemohon minimal 2 karakter")
+    
+    return errors
 
-        return jsonify({"success": True, "data": rows}), 200
-    except Exception as e:
-        print("get_all_laporan error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
-        conn.close()
-
-# ================== GET BY ID ==================
-@laporan_bp.route('/<int:laporan_id>', methods=['GET'])
-def get_laporan_by_id(laporan_id):
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            sql = """
-                SELECT l.id, l.id_warga, w.nama_warga,
-                       l.alamat, l.sudah_dipilah,
-                       l.jumlah_karung, l.jenis_sampah, l.jenis_pembayaran,
-                       l.jadwal_pengambilan, l.status,
-                       l.created_at
-                FROM laporan_sampah l
-                JOIN warga w ON l.id_warga = w.id
-                WHERE l.id = %s
-            """
-            cursor.execute(sql, (laporan_id,))
-            row = cursor.fetchone()
-
-        if not row:
-            return jsonify({"success": False, "message": "Data laporan tidak ditemukan"}), 404
-
-        return jsonify({"success": True, "data": row}), 200
-    except Exception as e:
-        print("get_laporan_by_id error:", e)
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
-        conn.close()
-
-# ================== CREATE ==================
-# ================== CREATE ==================
+# 1. CREATE LAPORAN (POST) - TAMBAH @cross_origin() di sini
 @laporan_bp.route('', methods=['POST'])
-def create_laporan():
-    data = request.json or {}
-    user_id = data.get('user_id')  # ganti dari id_warga ke user_id
-    alamat = data.get('alamat')
-    sudah_dipilah = data.get('sudah_dipilah', 0)
-    jumlah_karung = data.get('jumlah_karung')
-    jenis_pembayaran = data.get('jenis_pembayaran')
-    tanggal_pengambilan = data.get('tanggal_pengambilan')
-    jam_pengambilan = data.get('jam_pengambilan')
-    jenis_sampah = data.get('jenis_sampah')
-
-    # Validasi
-    if not user_id:
-        return jsonify({"success": False, "message": "user_id wajib diisi"}), 400
-    if jumlah_karung is None:
-        return jsonify({"success": False, "message": "jumlah_karung wajib diisi"}), 400
-    if not jenis_pembayaran:
-        return jsonify({"success": False, "message": "jenis_pembayaran wajib diisi"}), 400
-    if not tanggal_pengambilan:
-        return jsonify({"success": False, "message": "tanggal_pengambilan wajib diisi"}), 400
-    if not jenis_sampah:
-        return jsonify({"success": False, "message": "jenis_sampah wajib diisi"}), 400
-
-    # Boolean to int
-    sudah_dipilah_val = 1 if sudah_dipilah else 0
-
-    # Parse jadwal
+@token_required
+def create_laporan(current_user):
     try:
-        if jam_pengambilan:
-            if len(jam_pengambilan) == 5:
-                jam_pengambilan += ":00"
-            jadwal_dt = datetime.strptime(f"{tanggal_pengambilan} {jam_pengambilan}", "%Y-%m-%d %H:%M:%S")
-        else:
-            jadwal_dt = datetime.strptime(f"{tanggal_pengambilan} 08:00:00", "%Y-%m-%d %H:%M:%S")
-    except ValueError as e:
-        return jsonify({"success": False, "message": f"Format tanggal/jam tidak valid: {str(e)}"}), 400
-
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            # Ambil id_warga dari user_id
-            cursor.execute("SELECT id, alamat FROM warga WHERE user_id = %s", (user_id,))
+        data = request.json
+        print("Data received:", data)  # Debug logging
+        
+        # Validasi input
+        validation_errors = validate_laporan_data(data)
+        if validation_errors:
+            return jsonify({
+                'success': False,
+                'message': 'Validasi gagal',
+                'errors': validation_errors
+            }), 400
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Generate kode laporan
+        kode_laporan = generate_kode_laporan()
+        
+        # Cek apakah data jadwal valid
+        if data.get('id_jadwal'):
+            cursor.execute("SELECT id FROM jadwal WHERE id = %s", (data['id_jadwal'],))
+            jadwal = cursor.fetchone()
+            if not jadwal:
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'message': 'Jadwal tidak ditemukan'
+                }), 404
+        
+        # Cek apakah warga valid
+        if data.get('id_warga'):
+            cursor.execute("SELECT id FROM warga WHERE id = %s", (data['id_warga'],))
             warga = cursor.fetchone()
             if not warga:
-                return jsonify({"success": False, "message": "Data warga tidak ditemukan"}), 404
-
-            id_warga = warga['id']
-            if not alamat:
-                alamat = warga['alamat']
-
-            sql = """
-                INSERT INTO laporan_sampah
-                (id_warga, alamat, sudah_dipilah, jumlah_karung,
-                 jenis_pembayaran, jadwal_pengambilan, jenis_sampah, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'menunggu')
-            """
-            cursor.execute(sql, (id_warga, alamat, sudah_dipilah_val, jumlah_karung,
-                                 jenis_pembayaran, jadwal_dt, jenis_sampah))
-            conn.commit()
-            new_id = cursor.lastrowid
-
-        return jsonify({"success": True, "message": "Laporan sampah berhasil dibuat", "laporan_id": new_id}), 201
-    except Exception as e:
-        print("create_laporan error:", e)
-        conn.rollback()
-        return jsonify({"success": False, "message": f"Server error: {str(e)}"}), 500
-    finally:
+                conn.close()
+                return jsonify({
+                    'success': False,
+                    'message': 'Warga tidak ditemukan'
+                }), 404
+        
+        # Siapkan data untuk insert
+        insert_data = {
+            'id_jadwal': data.get('id_jadwal'),
+            'id_warga': data.get('id_warga'),
+            'kode_laporan': kode_laporan,
+            'jenis_sampah': data.get('jenis_sampah', ''),
+            'jenis_lainnya': data.get('jenis_lainnya', ''),
+            'estimasi_volume': data.get('estimasi_volume', 'sedang'),
+            'alamat_detail': data.get('alamat_detail', ''),
+            'rt': data.get('rt', ''),
+            'rw': data.get('rw', ''),
+            'nomor_hp': data.get('nomor_hp', ''),
+            'nama_pemohon': data.get('nama_pemohon', ''),
+            'keterangan': data.get('keterangan', ''),
+            'waktu_pengambilan': data.get('waktu_pengambilan', 'pagi'),
+            'foto_sampah': data.get('foto_sampah'),
+            'status': data.get('status', 'menunggu'),
+            'catatan_petugas': data.get('catatan_petugas', '')
+        }
+        
+        # Query untuk insert
+        query = """
+            INSERT INTO laporan (
+                id_jadwal, id_warga, kode_laporan, jenis_sampah, jenis_lainnya,
+                estimasi_volume, alamat_detail, rt, rw, nomor_hp, nama_pemohon,
+                keterangan, waktu_pengambilan, foto_sampah, status, catatan_petugas
+            ) VALUES (
+                %(id_jadwal)s, %(id_warga)s, %(kode_laporan)s, %(jenis_sampah)s, %(jenis_lainnya)s,
+                %(estimasi_volume)s, %(alamat_detail)s, %(rt)s, %(rw)s, %(nomor_hp)s, %(nama_pemohon)s,
+                %(keterangan)s, %(waktu_pengambilan)s, %(foto_sampah)s, %(status)s, %(catatan_petugas)s
+            )
+        """
+        
+        cursor.execute(query, insert_data)
+        laporan_id = cursor.lastrowid
+        
+        conn.commit()
+        
+        # Ambil data yang baru dibuat
+        cursor.execute("""
+            SELECT l.*, j.tanggal as tanggal_jadwal, j.wilayah, 
+                   w.nama_lengkap as nama_warga, w.no_telepon
+            FROM laporan l
+            LEFT JOIN jadwal j ON l.id_jadwal = j.id
+            LEFT JOIN warga w ON l.id_warga = w.id
+            WHERE l.id = %s
+        """, (laporan_id,))
+        
+        new_laporan = cursor.fetchone()
         conn.close()
+        
+        # Format response
+        response_data = {
+            'id': new_laporan['id'],
+            'kode_laporan': new_laporan['kode_laporan'],
+            'id_jadwal': new_laporan['id_jadwal'],
+            'id_warga': new_laporan['id_warga'],
+            'jenis_sampah': new_laporan['jenis_sampah'],
+            'jenis_lainnya': new_laporan['jenis_lainnya'],
+            'estimasi_volume': new_laporan['estimasi_volume'],
+            'alamat_detail': new_laporan['alamat_detail'],
+            'rt': new_laporan['rt'],
+            'rw': new_laporan['rw'],
+            'nomor_hp': new_laporan['nomor_hp'],
+            'nama_pemohon': new_laporan['nama_pemohon'],
+            'keterangan': new_laporan['keterangan'],
+            'waktu_pengambilan': new_laporan['waktu_pengambilan'],
+            'status': new_laporan['status'],
+            'tanggal_laporan': new_laporan['tanggal_laporan'].isoformat() if new_laporan['tanggal_laporan'] else None,
+            'nama_warga': new_laporan['nama_warga'],
+            'wilayah': new_laporan['wilayah'],
+            'tanggal_jadwal': new_laporan['tanggal_jadwal'].isoformat() if new_laporan['tanggal_jadwal'] else None
+        }
+        
+        return jsonify({
+            'success': True,
+            'message': 'Laporan berhasil dibuat',
+            'data': response_data
+        }), 201
+        
+    except pymysql.err.IntegrityError as e:
+        print(f"IntegrityError: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Data duplikat ditemukan'
+        }), 400
+    except Exception as e:
+        print(f"Error in create_laporan: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat membuat laporan'
+        }), 500
 
-# ================== UPDATE STATUS ==================
-@laporan_bp.route('/<int:laporan_id>/status', methods=['PATCH'])
-def update_laporan_status(laporan_id):
-    data = request.json or {}
-    new_status = data.get('status')
-    id_petugas = data.get('id_petugas')
-
-    if not new_status:
-        return jsonify({"success": False, "message": "status wajib diisi"}), 400
-
-    new_status = new_status.lower()
-    allowed_status = ['menunggu', 'dijemput', 'selesai']
-    if new_status not in allowed_status:
-        return jsonify({"success": False, "message": "Status tidak valid"}), 400
-
-    conn = get_connection()
+# 2. GET ALL LAPORAN (GET)
+@laporan_bp.route('/', methods=['GET'])
+@token_required
+def get_all_laporan(current_user):
     try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT id, id_warga, jumlah_karung, status FROM laporan_sampah WHERE id=%s", (laporan_id,))
-            laporan = cursor.fetchone()
-            if not laporan:
-                return jsonify({"success": False, "message": "Data laporan tidak ditemukan"}), 404
-
-            if laporan['status'] == 'selesai' and new_status != 'selesai':
-                return jsonify({"success": False, "message": "Laporan yang sudah selesai tidak bisa diubah"}), 400
-
-            cursor.execute("UPDATE laporan_sampah SET status=%s WHERE id=%s", (new_status, laporan_id))
-
-            # Tambah ke riwayat_aktivitas jika perlu
-            riwayat_status = None
-            if new_status == 'dijemput':
-                riwayat_status = 'diambil'
-            elif new_status == 'selesai':
-                riwayat_status = 'selesai'
-
-            if riwayat_status:
-                petugas_id_val = int(id_petugas) if id_petugas not in (None, '', 0, '0') else None
-                sql_riwayat = """
-                    INSERT INTO riwayat_aktivitas
-                    (id_warga, id_petugas, jumlah_karung, status)
-                    VALUES (%s, %s, %s, %s)
-                """
-                cursor.execute(sql_riwayat, (laporan['id_warga'], petugas_id_val, laporan['jumlah_karung'], riwayat_status))
-
-            conn.commit()
-        return jsonify({"success": True, "message": f"Status laporan berhasil diubah menjadi '{new_status}'"}), 200
-    except Exception as e:
-        print("update_laporan_status error:", e)
-        conn.rollback()
-        return jsonify({"success": False, "message": "Server error"}), 500
-    finally:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Query dengan join ke tabel terkait
+        cursor.execute("""
+            SELECT 
+                l.*,
+                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai, j.nama_petugas,
+                w.nama_lengkap as nama_warga, w.no_telepon as telp_warga,
+                u.username
+            FROM laporan l
+            LEFT JOIN jadwal j ON l.id_jadwal = j.id
+            LEFT JOIN warga w ON l.id_warga = w.id
+            LEFT JOIN users u ON w.user_id = u.id
+            ORDER BY l.tanggal_laporan DESC
+        """)
+        
+        laporan_list = cursor.fetchall()
         conn.close()
+        
+        # Format response
+        formatted_data = []
+        for laporan in laporan_list:
+            formatted_data.append({
+                'id': laporan['id'],
+                'kode_laporan': laporan['kode_laporan'],
+                'id_jadwal': laporan['id_jadwal'],
+                'id_warga': laporan['id_warga'],
+                'jenis_sampah': laporan['jenis_sampah'],
+                'estimasi_volume': laporan['estimasi_volume'],
+                'alamat_detail': laporan['alamat_detail'],
+                'rt': laporan['rt'],
+                'rw': laporan['rw'],
+                'nomor_hp': laporan['nomor_hp'],
+                'nama_pemohon': laporan['nama_pemohon'],
+                'status': laporan['status'],
+                'tanggal_laporan': laporan['tanggal_laporan'].isoformat() if laporan['tanggal_laporan'] else None,
+                'nama_warga': laporan['nama_warga'],
+                'telp_warga': laporan['telp_warga'],
+                'username': laporan['username'],
+                'wilayah': laporan['wilayah'],
+                'tanggal_jadwal': laporan['tanggal_jadwal'].isoformat() if laporan['tanggal_jadwal'] else None,
+                'nama_petugas': laporan['nama_petugas']
+            })
+        
+        return jsonify({
+            'success': True,
+            'count': len(formatted_data),
+            'data': formatted_data
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in get_all_laporan: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat mengambil data laporan'
+        }), 500
+
+# 3. GET LAPORAN BY ID (GET)
+@laporan_bp.route('/<int:id>', methods=['GET'])
+@token_required
+def get_laporan(current_user, id):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                l.*,
+                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai, j.nama_petugas,
+                w.nama_lengkap as nama_warga, w.no_telepon as telp_warga, w.alamat_lengkap as alamat_warga,
+                u.username, u.email
+            FROM laporan l
+            LEFT JOIN jadwal j ON l.id_jadwal = j.id
+            LEFT JOIN warga w ON l.id_warga = w.id
+            LEFT JOIN users u ON w.user_id = u.id
+            WHERE l.id = %s
+        """, (id,))
+        
+        laporan = cursor.fetchone()
+        conn.close()
+        
+        if not laporan:
+            return jsonify({
+                'success': False,
+                'message': 'Laporan tidak ditemukan'
+            }), 404
+        
+        # Format response
+        response_data = {
+            'id': laporan['id'],
+            'kode_laporan': laporan['kode_laporan'],
+            'id_jadwal': laporan['id_jadwal'],
+            'id_warga': laporan['id_warga'],
+            'jenis_sampah': laporan['jenis_sampah'],
+            'jenis_lainnya': laporan['jenis_lainnya'],
+            'estimasi_volume': laporan['estimasi_volume'],
+            'alamat_detail': laporan['alamat_detail'],
+            'rt': laporan['rt'],
+            'rw': laporan['rw'],
+            'nomor_hp': laporan['nomor_hp'],
+            'nama_pemohon': laporan['nama_pemohon'],
+            'keterangan': laporan['keterangan'],
+            'waktu_pengambilan': laporan['waktu_pengambilan'],
+            'foto_sampah': laporan['foto_sampah'],
+            'status': laporan['status'],
+            'tanggal_laporan': laporan['tanggal_laporan'].isoformat() if laporan['tanggal_laporan'] else None,
+            'tanggal_verifikasi': laporan['tanggal_verifikasi'].isoformat() if laporan['tanggal_verifikasi'] else None,
+            'tanggal_selesai': laporan['tanggal_selesai'].isoformat() if laporan['tanggal_selesai'] else None,
+            'catatan_petugas': laporan['catatan_petugas'],
+            'nama_warga': laporan['nama_warga'],
+            'telp_warga': laporan['telp_warga'],
+            'alamat_warga': laporan['alamat_warga'],
+            'username': laporan['username'],
+            'email': laporan['email'],
+            'wilayah': laporan['wilayah'],
+            'tanggal_jadwal': laporan['tanggal_jadwal'].isoformat() if laporan['tanggal_jadwal'] else None,
+            'jam_mulai': str(laporan['jam_mulai']) if laporan['jam_mulai'] else None,
+            'jam_selesai': str(laporan['jam_selesai']) if laporan['jam_selesai'] else None,
+            'nama_petugas': laporan['nama_petugas']
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': response_data
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in get_laporan: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat mengambil data laporan'
+        }), 500
+
+# 4. UPDATE LAPORAN (PUT)
+@laporan_bp.route('/<int:id>', methods=['PUT'])
+@token_required
+def update_laporan(current_user, id):
+    try:
+        data = request.json
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Cek apakah laporan ada
+        cursor.execute("SELECT id FROM laporan WHERE id = %s", (id,))
+        laporan = cursor.fetchone()
+        
+        if not laporan:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': 'Laporan tidak ditemukan'
+            }), 404
+        
+        # Update fields
+        update_fields = []
+        update_values = []
+        
+        fields_to_update = [
+            'status', 'catatan_petugas', 'jenis_sampah', 'jenis_lainnya',
+            'estimasi_volume', 'alamat_detail', 'rt', 'rw', 'nomor_hp',
+            'nama_pemohon', 'keterangan', 'waktu_pengambilan', 'foto_sampah'
+        ]
+        
+        for field in fields_to_update:
+            if field in data:
+                update_fields.append(f"{field} = %s")
+                update_values.append(data[field])
+        
+        # Tanggal verifikasi jika status berubah
+        if 'status' in data and data['status'] == 'diproses' and 'tanggal_verifikasi' not in data:
+            update_fields.append("tanggal_verifikasi = NOW()")
+        
+        # Tanggal selesai jika status berubah menjadi selesai
+        if 'status' in data and data['status'] == 'selesai':
+            update_fields.append("tanggal_selesai = NOW()")
+        
+        # Update jika ada field yang diubah
+        if update_fields:
+            update_values.append(id)
+            update_query = f"UPDATE laporan SET {', '.join(update_fields)} WHERE id = %s"
+            cursor.execute(update_query, update_values)
+            conn.commit()
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Laporan berhasil diperbarui'
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in update_laporan: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat memperbarui laporan'
+        }), 500
+
+# 5. GET LAPORAN BY WARGA (GET)
+@laporan_bp.route('/warga/<int:warga_id>', methods=['GET'])
+@token_required
+def get_laporan_by_warga(current_user, warga_id):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                l.*,
+                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai, j.nama_petugas
+            FROM laporan l
+            LEFT JOIN jadwal j ON l.id_jadwal = j.id
+            WHERE l.id_warga = %s
+            ORDER BY l.tanggal_laporan DESC
+        """, (warga_id,))
+        
+        laporan_list = cursor.fetchall()
+        conn.close()
+        
+        # Format response
+        formatted_data = []
+        for laporan in laporan_list:
+            formatted_data.append({
+                'id': laporan['id'],
+                'kode_laporan': laporan['kode_laporan'],
+                'jenis_sampah': laporan['jenis_sampah'],
+                'estimasi_volume': laporan['estimasi_volume'],
+                'alamat_detail': laporan['alamat_detail'],
+                'status': laporan['status'],
+                'tanggal_laporan': laporan['tanggal_laporan'].isoformat() if laporan['tanggal_laporan'] else None,
+                'wilayah': laporan['wilayah'],
+                'tanggal_jadwal': laporan['tanggal_jadwal'].isoformat() if laporan['tanggal_jadwal'] else None,
+                'nama_petugas': laporan['nama_petugas']
+            })
+        
+        return jsonify({
+            'success': True,
+            'count': len(formatted_data),
+            'data': formatted_data
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in get_laporan_by_warga: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat mengambil data laporan'
+        }), 500
+
+# 6. STATISTICS LAPORAN (GET)
+@laporan_bp.route('/stats', methods=['GET'])
+@token_required
+def get_laporan_stats(current_user):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Total laporan
+        cursor.execute("SELECT COUNT(*) as total FROM laporan")
+        total = cursor.fetchone()['total']
+        
+        # Per status
+        cursor.execute("""
+            SELECT status, COUNT(*) as jumlah
+            FROM laporan
+            GROUP BY status
+        """)
+        per_status = cursor.fetchall()
+        
+        # Per hari (7 hari terakhir)
+        cursor.execute("""
+            SELECT DATE(tanggal_laporan) as tanggal, COUNT(*) as jumlah
+            FROM laporan
+            WHERE tanggal_laporan >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+            GROUP BY DATE(tanggal_laporan)
+            ORDER BY tanggal DESC
+        """)
+        per_hari = cursor.fetchall()
+        
+        # Per wilayah
+        cursor.execute("""
+            SELECT j.wilayah, COUNT(l.id) as jumlah
+            FROM laporan l
+            LEFT JOIN jadwal j ON l.id_jadwal = j.id
+            WHERE j.wilayah IS NOT NULL
+            GROUP BY j.wilayah
+            ORDER BY jumlah DESC
+            LIMIT 10
+        """)
+        per_wilayah = cursor.fetchall()
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total': total,
+                'per_status': per_status,
+                'per_hari': [
+                    {
+                        'tanggal': row['tanggal'].isoformat() if row['tanggal'] else None,
+                        'jumlah': row['jumlah']
+                    }
+                    for row in per_hari
+                ],
+                'per_wilayah': per_wilayah
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in get_laporan_stats: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat mengambil statistik laporan'
+        }), 500
