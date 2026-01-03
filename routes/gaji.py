@@ -538,3 +538,293 @@ def hapus_pengeluaran_gaji(jadwal_id):
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         conn.close()
+        
+# routes/gaji.py - Tambahkan setelah endpoint yang sudah ada
+
+@gaji_bp.route('/petugas/<int:petugas_id>', methods=['GET'])
+def get_gaji_petugas(petugas_id):
+    """Get salary history for specific petugas"""
+    print(f"🔍 DEBUG: Looking for petugas_id = {petugas_id}")
+    
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Cek apakah petugas ada
+            cursor.execute("""
+                SELECT p.id, p.nama_lengkap, p.user_id, u.username
+                FROM petugas p
+                JOIN users u ON p.user_id = u.id
+                WHERE p.id = %s
+            """, (petugas_id,))
+            petugas = cursor.fetchone()
+            
+            print(f"🔍 DEBUG: Petugas query result: {petugas}")
+            
+            if not petugas:
+                # Coba cari by user_id jika petugas.id tidak ditemukan
+                cursor.execute("""
+                    SELECT p.id, p.nama_lengkap, p.user_id, u.username
+                    FROM petugas p
+                    JOIN users u ON p.user_id = u.id
+                    WHERE p.user_id = %s
+                """, (petugas_id,))
+                petugas = cursor.fetchone()
+                print(f"🔍 DEBUG: Second try by user_id: {petugas}")
+            
+            if not petugas:
+                return jsonify({
+                    "success": False,
+                    "message": f"Petugas tidak ditemukan"
+                }), 404
+            
+            print(f"✅ DEBUG: Found petugas: {petugas}")
+            
+            # Get salary history
+            cursor.execute("""
+                SELECT 
+                    rg.id,
+                    rg.jadwal_id,
+                    rg.gaji,
+                    rg.tanggal_bayar,
+                    rg.keterangan,
+                    rg.created_at,
+                    j.wilayah
+                FROM riwayat_gaji rg
+                LEFT JOIN jadwal j ON rg.jadwal_id = j.id
+                WHERE rg.petugas_id = %s
+                ORDER BY rg.tanggal_bayar DESC
+            """, (petugas['id'],))  # Pakai petugas.id (bukan parameter)
+            
+            rows = cursor.fetchall()
+            print(f"✅ DEBUG: Found {len(rows)} salary records for petugas_id={petugas['id']}")
+            
+            # Format results
+            result = []
+            for row in rows:
+                result.append({
+                    'id': row['id'],
+                    'petugas_id': petugas['id'],
+                    'jadwal_id': row['jadwal_id'],
+                    'gaji': float(row['gaji']) if row['gaji'] else 0,
+                    'tanggal_bayar': row['tanggal_bayar'].strftime('%Y-%m-%d') if row['tanggal_bayar'] else '',
+                    'keterangan': row['keterangan'] or '',
+                    'wilayah': row['wilayah'] or '',
+                    'nama_lengkap': petugas['nama_lengkap'],
+                    'username': petugas['username']
+                })
+            
+            return jsonify({
+                "success": True,
+                "data": result,
+                "petugas_info": {
+                    "id": petugas['id'],
+                    "user_id": petugas['user_id'],
+                    "nama_lengkap": petugas['nama_lengkap'],
+                    "username": petugas['username']
+                },
+                "count": len(result),
+                "message": f"Found {len(result)} salary records"
+            }), 200
+            
+    except Exception as e:
+        print(f"❌ ERROR in get_gaji_petugas: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "message": f"Server error: {str(e)}"
+        }), 500
+    finally:
+        conn.close()
+        
+        
+@gaji_bp.route('/petugas/<int:petugas_id>/filter', methods=['GET'])
+def get_gaji_petugas_filtered(petugas_id):
+    """Get salary by date range for specific petugas"""
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Build query
+            sql = """
+                SELECT 
+                    rg.*,
+                    j.wilayah,
+                    DATE_FORMAT(rg.tanggal_bayar, '%%Y-%%m-%%d') as tanggal,
+                    DATE_FORMAT(rg.tanggal_bayar, '%%d %%M %%Y') as tanggal_formatted
+                FROM riwayat_gaji rg
+                LEFT JOIN jadwal j ON rg.jadwal_id = j.id
+                WHERE rg.petugas_id = %s
+            """
+            params = [petugas_id]
+            
+            if start_date:
+                sql += " AND rg.tanggal_bayar >= %s"
+                params.append(start_date)
+            
+            if end_date:
+                sql += " AND rg.tanggal_bayar <= %s"
+                params.append(end_date)
+            
+            sql += " ORDER BY rg.tanggal_bayar DESC"
+            
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+            
+            # Group by date
+            grouped_by_date = {}
+            daily_totals = {}
+            
+            for row in rows:
+                tanggal = row['tanggal']
+                tanggal_formatted = row['tanggal_formatted']
+                gaji = float(row['gaji']) if row['gaji'] else 0
+                
+                if tanggal not in grouped_by_date:
+                    grouped_by_date[tanggal] = {
+                        'tanggal': tanggal,
+                        'tanggal_formatted': tanggal_formatted,
+                        'items': [],
+                        'total': 0
+                    }
+                    daily_totals[tanggal] = 0
+                
+                item = {
+                    'id': row['id'],
+                    'gaji': gaji,
+                    'gaji_formatted': f"Rp {gaji:,.0f}",
+                    'keterangan': row['keterangan'] or f"Jadwal {row['jadwal_id'] or '-'}",
+                    'wilayah': row['wilayah'] or 'Tidak ada wilayah'
+                }
+                
+                grouped_by_date[tanggal]['items'].append(item)
+                grouped_by_date[tanggal]['total'] += gaji
+                daily_totals[tanggal] += gaji
+            
+            # Convert to array
+            result = []
+            total_all = 0
+            
+            for tanggal in sorted(grouped_by_date.keys(), reverse=True):
+                daily_data = grouped_by_date[tanggal]
+                daily_data['total_formatted'] = f"Rp {daily_data['total']:,.0f}"
+                result.append(daily_data)
+                total_all += daily_data['total']
+            
+            return jsonify({
+                "success": True,
+                "data": {
+                    "grouped_by_date": result,
+                    "daily_totals": daily_totals,
+                    "total_all": total_all,
+                    "total_all_formatted": f"Rp {total_all:,.0f}",
+                    "date_range": {
+                        "start_date": start_date,
+                        "end_date": end_date
+                    }
+                },
+                "message": f"Found {len(rows)} records for date range"
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_gaji_petugas_filtered: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal memfilter data gaji"
+        }), 500
+    finally:
+        conn.close()
+        
+@gaji_bp.route('/petugas/<int:petugas_id>/stats/bulanan', methods=['GET'])
+def get_stats_bulanan_petugas(petugas_id):
+    """Get monthly income stats for petugas"""
+    year = request.args.get('year', datetime.now().year)
+    
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT 
+                    YEAR(tanggal_bayar) as tahun,
+                    MONTH(tanggal_bayar) as bulan,
+                    COUNT(*) as jumlah_transaksi,
+                    SUM(gaji) as total_gaji,
+                    MIN(gaji) as gaji_terendah,
+                    MAX(gaji) as gaji_tertinggi,
+                    AVG(gaji) as rata_gaji
+                FROM riwayat_gaji
+                WHERE petugas_id = %s
+                AND YEAR(tanggal_bayar) = %s
+                GROUP BY YEAR(tanggal_bayar), MONTH(tanggal_bayar)
+                ORDER BY tahun DESC, bulan DESC
+            """, (petugas_id, year))
+            
+            rows = cursor.fetchall()
+            
+            # Format bulan names
+            bulan_names = {
+                1: 'Januari', 2: 'Februari', 3: 'Maret', 4: 'April',
+                5: 'Mei', 6: 'Juni', 7: 'Juli', 8: 'Agustus',
+                9: 'September', 10: 'Oktober', 11: 'November', 12: 'Desember'
+            }
+            
+            result = []
+            yearly_total = 0
+            
+            for row in rows:
+                total_gaji = float(row['total_gaji']) if row['total_gaji'] else 0
+                yearly_total += total_gaji
+                
+                result.append({
+                    'tahun': row['tahun'],
+                    'bulan': row['bulan'],
+                    'bulan_nama': bulan_names.get(row['bulan'], f"Bulan {row['bulan']}"),
+                    'jumlah_transaksi': row['jumlah_transaksi'] or 0,
+                    'total_gaji': total_gaji,
+                    'total_gaji_formatted': f"Rp {total_gaji:,.0f}",
+                    'gaji_terendah': float(row['gaji_terendah']) if row['gaji_terendah'] else 0,
+                    'gaji_tertinggi': float(row['gaji_tertinggi']) if row['gaji_tertinggi'] else 0,
+                    'rata_gaji': float(row['rata_gaji']) if row['rata_gaji'] else 0,
+                    'periode': f"{bulan_names.get(row['bulan'], '')} {row['tahun']}"
+                })
+            
+            # Get year summary
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_transaksi_tahun,
+                    SUM(gaji) as total_gaji_tahun,
+                    AVG(gaji) as rata_gaji_tahun
+                FROM riwayat_gaji
+                WHERE petugas_id = %s
+                AND YEAR(tanggal_bayar) = %s
+            """, (petugas_id, year))
+            
+            year_summary = cursor.fetchone()
+            
+            return jsonify({
+                "success": True,
+                "data": {
+                    "monthly_stats": result,
+                    "year_summary": {
+                        "tahun": year,
+                        "total_transaksi": year_summary['total_transaksi_tahun'] or 0,
+                        "total_gaji": float(year_summary['total_gaji_tahun']) if year_summary['total_gaji_tahun'] else 0,
+                        "total_gaji_formatted": f"Rp {float(year_summary['total_gaji_tahun'] or 0):,.0f}",
+                        "rata_gaji": float(year_summary['rata_gaji_tahun']) if year_summary['rata_gaji_tahun'] else 0
+                    },
+                    "yearly_total": yearly_total,
+                    "yearly_total_formatted": f"Rp {yearly_total:,.0f}"
+                },
+                "message": f"Monthly stats for year {year}"
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_stats_bulanan_petugas: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal mengambil statistik bulanan"
+        }), 500
+    finally:
+        conn.close()

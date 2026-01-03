@@ -16,6 +16,7 @@ from routes.riwayat_admin import riwayat_admin_bp
 from routes.keuangan import keuangan_bp
 from routes.log import log_bp
 from routes.dashboard import dashboard_bp
+from routes.pengambilan import pengambilan_bp
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -43,6 +44,7 @@ app.register_blueprint(riwayat_admin_bp)
 app.register_blueprint(keuangan_bp)
 app.register_blueprint(log_bp)
 app.register_blueprint(dashboard_bp)
+app.register_blueprint(pengambilan_bp)
 @app.route('/')
 def index():
     return "SPS App API is running!"

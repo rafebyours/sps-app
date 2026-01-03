@@ -648,3 +648,686 @@ def search_petugas(current_user):
             'success': False,
             'message': 'Terjadi kesalahan saat mencari petugas'
         }), 500
+        
+# 8. GET TRANSACTIONS FOR PETUGAS
+@petugas_bp.route('/transaksi', methods=['GET'])
+@token_required
+def get_petugas_transaksi(current_user):
+    """
+    Mendapatkan data transaksi dengan filter untuk petugas
+    Query params:
+    - tanggal: YYYY-MM-DD (default: hari ini)
+    - jenis: pemasukan/pengeluaran/gaji/topup/semua (default: semua)
+    - filter_user: semua/saya/warga/petugas_lain (default: semua)
+    """
+    try:
+        # Get query parameters
+        tanggal = request.args.get('tanggal')
+        jenis = request.args.get('jenis', 'semua')
+        filter_user = request.args.get('filter_user', 'semua')
+        
+        # Jika user bukan petugas, return error
+        if current_user['role'] != 'petugas':
+            return jsonify({
+                'success': False,
+                'message': 'Akses ditolak. Hanya untuk petugas'
+            }), 403
+        
+        # Set default tanggal ke hari ini jika tidak ada
+        if not tanggal:
+            from datetime import datetime
+            tanggal = datetime.now().strftime('%Y-%m-%d')
+        
+        # Connect to database
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Base query untuk transaksi
+        query = """
+            SELECT 
+                t.*,
+                w.nama_lengkap as nama_warga,
+                w.alamat_lengkap alamat_warga,
+                w.rt as rt_warga,
+                w.rw as rw_warga,
+                p.nama_lengkap as nama_petugas,
+                l.jenis_sampah,
+                l.estimasi_volume,
+                l.foto_sampah
+            FROM transaksi t
+            LEFT JOIN warga w ON t.warga_id = w.id
+            LEFT JOIN petugas p ON t.petugas_id = p.id
+            LEFT JOIN laporan l ON t.laporan_id = l.id
+            WHERE DATE(t.tanggal) = %s
+        """
+        params = [tanggal]
+        
+        # Filter by jenis transaksi
+        if jenis != 'semua':
+            query += " AND t.jenis = %s"
+            params.append(jenis)
+        
+        # Filter by user type berdasarkan petugas yang login
+        if filter_user == 'saya':
+            # Ambil data petugas yang login
+            cursor.execute("SELECT id FROM petugas WHERE user_id = %s", (current_user['id'],))
+            petugas_data = cursor.fetchone()
+            
+            if petugas_data:
+                query += " AND t.petugas_id = %s"
+                params.append(petugas_data['id'])
+            else:
+                query += " AND t.petugas_id IS NULL"
+                
+        elif filter_user == 'warga':
+            query += " AND t.warga_id IS NOT NULL AND t.petugas_id IS NULL"
+        elif filter_user == 'petugas_lain':
+            # Ambil data petugas yang login
+            cursor.execute("SELECT id FROM petugas WHERE user_id = %s", (current_user['id'],))
+            petugas_data = cursor.fetchone()
+            
+            if petugas_data:
+                query += " AND t.petugas_id IS NOT NULL AND t.petugas_id != %s"
+                params.append(petugas_data['id'])
+            else:
+                query += " AND t.petugas_id IS NOT NULL"
+        
+        # Order by tanggal terbaru
+        query += " ORDER BY t.tanggal DESC"
+        
+        # Execute query
+        cursor.execute(query, params)
+        transaksi = cursor.fetchall()
+        
+        # Calculate summary statistics
+        summary_query = """
+            SELECT 
+                COALESCE(SUM(CASE WHEN jenis = 'pemasukan' THEN jumlah ELSE 0 END), 0) as total_pemasukan,
+                COALESCE(SUM(CASE WHEN jenis = 'pengeluaran' THEN jumlah ELSE 0 END), 0) as total_pengeluaran,
+                COALESCE(SUM(CASE WHEN jenis = 'gaji' THEN jumlah ELSE 0 END), 0) as total_gaji,
+                COALESCE(SUM(CASE WHEN jenis = 'topup' THEN jumlah ELSE 0 END), 0) as total_topup,
+                COALESCE(COUNT(*), 0) as total_transaksi,
+                COALESCE(SUM(CASE WHEN status_bayar = 'lunas' THEN 1 ELSE 0 END), 0) as transaksi_lunas,
+                COALESCE(SUM(CASE WHEN status_bayar = 'pending' THEN 1 ELSE 0 END), 0) as transaksi_pending
+            FROM transaksi 
+            WHERE DATE(tanggal) = %s
+        """
+        
+        summary_params = [tanggal]
+        
+        # Add filters to summary if needed
+        if jenis != 'semua':
+            summary_query += " AND jenis = %s"
+            summary_params.append(jenis)
+        
+        cursor.execute(summary_query, summary_params)
+        summary_result = cursor.fetchone()
+        
+        # Calculate statistics for current petugas
+        if filter_user == 'saya' or filter_user == 'semua':
+            # Ambil data petugas yang login
+            cursor.execute("SELECT id FROM petugas WHERE user_id = %s", (current_user['id'],))
+            petugas_data = cursor.fetchone()
+            
+            if petugas_data:
+                petugas_stats_query = """
+                    SELECT 
+                        COALESCE(COUNT(*), 0) as transaksi_saya,
+                        COALESCE(SUM(CASE WHEN jenis = 'pemasukan' THEN jumlah ELSE 0 END), 0) as pemasukan_saya
+                    FROM transaksi 
+                    WHERE DATE(tanggal) = %s AND petugas_id = %s
+                """
+                cursor.execute(petugas_stats_query, (tanggal, petugas_data['id']))
+                petugas_stats = cursor.fetchone()
+                
+                transaksi_saya = petugas_stats['transaksi_saya']
+                pemasukan_saya = float(petugas_stats['pemasukan_saya'] or 0)
+            else:
+                transaksi_saya = 0
+                pemasukan_saya = 0
+        else:
+            transaksi_saya = 0
+            pemasukan_saya = 0
+        
+        # Format summary
+        summary = {
+            'pemasukan': float(summary_result['total_pemasukan'] or 0),
+            'pengeluaran': float(summary_result['total_pengeluaran'] or 0),
+            'gaji': float(summary_result['total_gaji'] or 0),
+            'topup': float(summary_result['total_topup'] or 0),
+            'saldo': float((summary_result['total_pemasukan'] or 0) - (summary_result['total_pengeluaran'] or 0)),
+            'total_transaksi': summary_result['total_transaksi'] or 0,
+            'transaksi_lunas': summary_result['transaksi_lunas'] or 0,
+            'transaksi_pending': summary_result['transaksi_pending'] or 0,
+            'transaksi_saya': transaksi_saya,
+            'pemasukan_saya': pemasukan_saya
+        }
+        
+        conn.close()
+        
+        # Format response data
+        formatted_transaksi = []
+        for t in transaksi:
+            formatted_transaksi.append({
+                'id': t['id'],
+                'kode_transaksi': t['kode_transaksi'],
+                'jenis': t['jenis'],
+                'kategori': t['kategori'],
+                'jumlah': float(t['jumlah']),
+                'harga_per_karung': float(t['harga_per_karung']) if t['harga_per_karung'] else None,
+                'total_karung': t['total_karung'],
+                'metode_bayar': t['metode_bayar'],
+                'status_bayar': t['status_bayar'],
+                'keterangan': t['keterangan'],
+                'tanggal': t['tanggal'].isoformat() if t['tanggal'] else None,
+                'warga_id': t['warga_id'],
+                'petugas_id': t['petugas_id'],
+                'laporan_id': t['laporan_id'],
+                'nama_warga': t['nama_warga'],
+                'nama_petugas': t['nama_petugas'],
+                'jenis_sampah': t['jenis_sampah'],
+                'total_karung': t['total_karung']
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': formatted_transaksi,
+            'summary': summary,
+            'tanggal': tanggal,
+            'filters': {
+                'jenis': jenis,
+                'filter_user': filter_user
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error get_petugas_transaksi: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Gagal mengambil data transaksi',
+            'error': str(e)
+        }), 500
+
+# 9. GET TRANSACTION SUMMARY FOR PETUGAS (Untuk Dashboard)
+@petugas_bp.route('/summary', methods=['GET'])
+@token_required
+def get_petugas_summary(current_user):
+    """
+    Mendapatkan summary rekap harian petugas (untuk halaman rekap)
+    """
+    try:
+        tanggal = request.args.get('tanggal')
+        
+        # Jika user bukan petugas, return error
+        if current_user['role'] != 'petugas':
+            return jsonify({
+                'success': False,
+                'message': 'Akses ditolak. Hanya untuk petugas'
+            }), 403
+        
+        # Set default tanggal ke hari ini jika tidak ada
+        if not tanggal:
+            from datetime import datetime
+            tanggal = datetime.now().strftime('%Y-%m-%d')
+        
+        # Connect to database
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Ambil data petugas yang login
+        cursor.execute("SELECT id FROM petugas WHERE user_id = %s", (current_user['id'],))
+        petugas_data = cursor.fetchone()
+        
+        if not petugas_data:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': 'Data petugas tidak ditemukan'
+            }), 404
+        
+        petugas_id = petugas_data['id']
+        
+        # Query untuk summary khusus petugas
+        query = """
+            SELECT 
+                -- Total pengambilan sampah (laporan yang dibuat oleh petugas ini)
+                COALESCE(COUNT(DISTINCT l.id), 0) as total_pengambilan,
+                
+                -- Total pemasukan dari petugas ini
+                COALESCE(SUM(CASE WHEN t.petugas_id = %s AND t.jenis = 'pemasukan' THEN t.jumlah ELSE 0 END), 0) as pemasukan_hari_ini,
+                
+                -- Total tunggak (transaksi pending dari warga untuk petugas ini)
+                COALESCE(SUM(CASE WHEN t.petugas_id = %s AND t.status_bayar = 'pending' THEN 1 ELSE 0 END), 0) as total_tunggak_kasus,
+                
+                -- Total transaksi yang dibuat oleh petugas ini
+                COALESCE(COUNT(CASE WHEN t.petugas_id = %s THEN 1 END), 0) as total_transaksi_saya
+                
+            FROM transaksi t
+            LEFT JOIN laporan l ON t.laporan_id = l.id AND l.petugas_id = %s
+            WHERE DATE(t.tanggal) = %s
+        """
+        
+        cursor.execute(query, (petugas_id, petugas_id, petugas_id, petugas_id, tanggal))
+        summary = cursor.fetchone()
+        
+        # Query untuk detail transaksi petugas (untuk tabel)
+        detail_query = """
+            SELECT 
+                t.id as id_transaksi,
+                COALESCE(w.nama_lengkap, 'Tidak ada data') as nama,
+                COALESCE(w.alamat_lengkap, '-') as alamat,
+                COALESCE(l.estimasi_volume, 0) as total_karung,
+                t.jumlah as pembayaran,
+                t.status_bayar,
+                CASE 
+                    WHEN t.status_bayar = 'pending' THEN 'Nunggak'
+                    WHEN t.status_bayar = 'lunas' THEN 'Lunas'
+                    ELSE 'Gagal'
+                END as status_pembayaran,
+                t.keterangan,
+                t.kode_transaksi
+            FROM transaksi t
+            LEFT JOIN warga w ON t.warga_id = w.id
+            LEFT JOIN laporan l ON t.laporan_id = l.id
+            WHERE DATE(t.tanggal) = %s AND t.petugas_id = %s
+            ORDER BY t.tanggal DESC
+        """
+        
+        cursor.execute(detail_query, (tanggal, petugas_id))
+        detail = cursor.fetchall()
+        
+        conn.close()
+        
+        # Format detail
+        formatted_detail = []
+        for d in detail:
+            formatted_detail.append({
+                'id': d['id_transaksi'],
+                'name': d['nama'],
+                'bags': d['total_karung'],
+                'payment': f"Rp {int(d['pembayaran']):,}".replace(',', '.'),
+                'status_bayar': d['status_bayar'],
+                'status_pembayaran': d['status_pembayaran'],
+                'keterangan': d['keterangan'],
+                'kode_transaksi': d['kode_transaksi']
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'pengambilan_sampah': summary['total_pengambilan'],
+                'pemasukan_hari_ini': float(summary['pemasukan_hari_ini']),
+                'total_tunggak_kasus': summary['total_tunggak_kasus'],
+                'total_transaksi_saya': summary['total_transaksi_saya'],
+                'detail': formatted_detail
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error get_petugas_summary: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Gagal mengambil summary',
+            'error': str(e)
+        }), 500
+
+# 10. CREATE TRANSACTION (Untuk Petugas)
+@petugas_bp.route('/transaksi/create', methods=['POST'])
+@token_required
+def create_transaksi(current_user):
+    """
+    Membuat transaksi baru (untuk petugas)
+    """
+    try:
+        data = request.json
+        
+        # Jika user bukan petugas, return error
+        if current_user['role'] != 'petugas':
+            return jsonify({
+                'success': False,
+                'message': 'Akses ditolak. Hanya untuk petugas'
+            }), 403
+        
+        # Validasi data wajib
+        required_fields = ['jenis', 'jumlah']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    'success': False,
+                    'message': f'Field {field} harus diisi'
+                }), 400
+        
+        # Connect to database
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Ambil data petugas yang login
+        cursor.execute("SELECT id FROM petugas WHERE user_id = %s", (current_user['id'],))
+        petugas_data = cursor.fetchone()
+        
+        if not petugas_data:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': 'Data petugas tidak ditemukan'
+            }), 404
+        
+        petugas_id = petugas_data['id']
+        
+        # Generate kode transaksi
+        from datetime import datetime
+        import random
+        
+        date_prefix = datetime.now().strftime('%y%m%d')
+        random_suffix = str(random.randint(1000, 9999))
+        
+        if data['jenis'] == 'pemasukan':
+            prefix = 'PM'
+        elif data['jenis'] == 'pengeluaran':
+            prefix = 'PL'
+        elif data['jenis'] == 'gaji':
+            prefix = 'GJ'
+        elif data['jenis'] == 'topup':
+            prefix = 'TP'
+        else:
+            prefix = 'TRX'
+        
+        kode_transaksi = f"{prefix}-{date_prefix}-{random_suffix}"
+        
+        # Mulai transaction
+        conn.begin()
+        
+        try:
+            # Query untuk insert transaksi
+            query = """
+                INSERT INTO transaksi (
+                    kode_transaksi,
+                    laporan_id,
+                    warga_id,
+                    petugas_id,
+                    jenis,
+                    kategori,
+                    jumlah,
+                    harga_per_karung,
+                    total_karung,
+                    metode_bayar,
+                    status_bayar,
+                    keterangan,
+                    tanggal
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            values = (
+                kode_transaksi,
+                data.get('laporan_id'),
+                data.get('warga_id'),
+                petugas_id,  # Petugas yang membuat
+                data['jenis'],
+                data.get('kategori'),
+                float(data['jumlah']),
+                data.get('harga_per_karung', 5000.00),
+                data.get('total_karung'),
+                data.get('metode_bayar', 'cash'),
+                data.get('status_bayar', 'lunas'),
+                data.get('keterangan'),
+                datetime.now()
+            )
+            
+            cursor.execute(query, values)
+            transaksi_id = cursor.lastrowid
+            
+            # Jika transaksi pemasukan dari warga, update saldo warga
+            if data['jenis'] == 'pemasukan' and data.get('warga_id'):
+                update_saldo_query = """
+                    UPDATE warga 
+                    SET saldo = saldo - %s
+                    WHERE id = %s
+                """
+                cursor.execute(update_saldo_query, (float(data['jumlah']), data['warga_id']))
+            
+            conn.commit()
+            
+            # Ambil data transaksi yang baru dibuat
+            cursor.execute("SELECT * FROM transaksi WHERE id = %s", (transaksi_id,))
+            new_transaksi = cursor.fetchone()
+            
+            conn.close()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Transaksi berhasil dibuat',
+                'data': {
+                    'id': transaksi_id,
+                    'kode_transaksi': kode_transaksi,
+                    'jenis': new_transaksi['jenis'],
+                    'jumlah': float(new_transaksi['jumlah']),
+                    'status_bayar': new_transaksi['status_bayar'],
+                    'tanggal': new_transaksi['tanggal'].isoformat() if new_transaksi['tanggal'] else None
+                }
+            }), 201
+            
+        except Exception as e:
+            conn.rollback()
+            raise e
+            
+    except Exception as e:
+        print(f"Error create_transaksi: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Gagal membuat transaksi',
+            'error': str(e)
+        }), 500
+
+# 11. GET TRANSACTION PERIOD (Untuk Grafik/Chart)
+@petugas_bp.route('/transaksi/period', methods=['GET'])
+@token_required
+def get_transaksi_period(current_user):
+    """
+    Mendapatkan data transaksi untuk periode tertentu (grafik)
+    """
+    try:
+        period = request.args.get('period', 'today')
+        
+        # Jika user bukan petugas, return error
+        if current_user['role'] != 'petugas':
+            return jsonify({
+                'success': False,
+                'message': 'Akses ditolak. Hanya untuk petugas'
+            }), 403
+        
+        # Connect to database
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Ambil data petugas yang login
+        cursor.execute("SELECT id FROM petugas WHERE user_id = %s", (current_user['id'],))
+        petugas_data = cursor.fetchone()
+        
+        if not petugas_data:
+            conn.close()
+            return jsonify({
+                'success': False,
+                'message': 'Data petugas tidak ditemukan'
+            }), 404
+        
+        petugas_id = petugas_data['id']
+        
+        # Base query dengan filter periode
+        if period == 'today':
+            date_filter = "DATE(tanggal) = CURDATE()"
+        elif period == 'week':
+            date_filter = "YEARWEEK(tanggal, 1) = YEARWEEK(CURDATE(), 1)"
+        elif period == 'month':
+            date_filter = "MONTH(tanggal) = MONTH(CURDATE()) AND YEAR(tanggal) = YEAR(CURDATE())"
+        elif period == 'year':
+            date_filter = "YEAR(tanggal) = YEAR(CURDATE())"
+        else:
+            # Custom range: format YYYY-MM-DD to YYYY-MM-DD
+            date_range = period.split('_')
+            if len(date_range) == 2:
+                date_filter = f"DATE(tanggal) BETWEEN '{date_range[0]}' AND '{date_range[1]}'"
+            else:
+                date_filter = "DATE(tanggal) = CURDATE()"
+        
+        # Query untuk chart/grafik
+        query = f"""
+            SELECT 
+                DATE(tanggal) as tanggal,
+                jenis,
+                COALESCE(SUM(CASE WHEN jenis = 'pemasukan' THEN jumlah ELSE 0 END), 0) as total_pemasukan,
+                COALESCE(SUM(CASE WHEN jenis = 'pengeluaran' THEN jumlah ELSE 0 END), 0) as total_pengeluaran,
+                COALESCE(COUNT(*), 0) as jumlah_transaksi
+            FROM transaksi
+            WHERE {date_filter} AND petugas_id = %s
+            GROUP BY DATE(tanggal), jenis 
+            ORDER BY tanggal
+        """
+        
+        cursor.execute(query, (petugas_id,))
+        chart_data = cursor.fetchall()
+        
+        # Query untuk top 5 warga
+        top_warga_query = f"""
+            SELECT 
+                w.nama_legkap,
+                w.alamat_lengkap,
+                COALESCE(COUNT(t.id), 0) as jumlah_transaksi,
+                COALESCE(SUM(t.jumlah), 0) as total_nominal
+            FROM transaksi t
+            JOIN warga w ON t.warga_id = w.id
+            WHERE {date_filter} AND t.petugas_id = %s AND t.jenis = 'pemasukan'
+            GROUP BY w.id
+            ORDER BY total_nominal DESC
+            LIMIT 5
+        """
+        
+        cursor.execute(top_warga_query, (petugas_id,))
+        top_warga = cursor.fetchall()
+        
+        conn.close()
+        
+        # Format response
+        formatted_chart = []
+        for data in chart_data:
+            formatted_chart.append({
+                'tanggal': data['tanggal'].isoformat() if data['tanggal'] else None,
+                'jenis': data['jenis'],
+                'total_pemasukan': float(data['total_pemasukan']),
+                'total_pengeluaran': float(data['total_pengeluaran']),
+                'jumlah_transaksi': data['jumlah_transaksi']
+            })
+        
+        formatted_top_warga = []
+        for warga in top_warga:
+            formatted_top_warga.append({
+                'nama': warga['nama'],
+                'alamat': warga['alamat'],
+                'jumlah_transaksi': warga['jumlah_transaksi'],
+                'total_nominal': float(warga['total_nominal'])
+            })
+        
+        return jsonify({
+            'success': True,
+            'period': period,
+            'chart_data': formatted_chart,
+            'top_warga': formatted_top_warga
+        }), 200
+        
+    except Exception as e:
+        print(f"Error get_transaksi_period: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Gagal mengambil data transaksi periode',
+            'error': str(e)
+        }), 500
+
+# 12. GET TRANSACTION DETAIL
+@petugas_bp.route('/transaksi/<int:transaksi_id>', methods=['GET'])
+@token_required
+def get_transaksi_detail(current_user, transaksi_id):
+    """
+    Mendapatkan detail transaksi tertentu
+    """
+    try:
+        # Jika user bukan petugas, return error
+        if current_user['role'] != 'petugas':
+            return jsonify({
+                'success': False,
+                'message': 'Akses ditolak. Hanya untuk petugas'
+            }), 403
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT 
+                t.*,
+                w.nama_lengkap as nama_warga,
+                w.no_telepon as telepon_warga,
+                w.alamat_lengkap as alamat_warga,
+                w.rt as rt_warga,
+                w.rw as rw_warga,
+                p.nama_lengkap as nama_petugas,
+                p.no_telepon as telepon_petugas,
+                l.jenis_sampah,
+                l.estimasi_volume,
+                l.foto_sampah
+            FROM transaksi t
+            LEFT JOIN warga w ON t.warga_id = w.id
+            LEFT JOIN petugas p ON t.petugas_id = p.id
+            LEFT JOIN laporan l ON t.laporan_id = l.id
+            WHERE t.id = %s
+        """
+        
+        cursor.execute(query, (transaksi_id,))
+        transaksi = cursor.fetchone()
+        
+        conn.close()
+        
+        if not transaksi:
+            return jsonify({
+                'success': False,
+                'message': 'Transaksi tidak ditemukan'
+            }), 404
+        
+        # Format response
+        formatted_transaksi = {
+            'id': transaksi['id'],
+            'kode_transaksi': transaksi['kode_transaksi'],
+            'jenis': transaksi['jenis'],
+            'kategori': transaksi['kategori'],
+            'jumlah': float(transaksi['jumlah']),
+            'harga_per_karung': float(transaksi['harga_per_karung']) if transaksi['harga_per_karung'] else None,
+            'total_karung': transaksi['total_karung'],
+            'metode_bayar': transaksi['metode_bayar'],
+            'status_bayar': transaksi['status_bayar'],
+            'keterangan': transaksi['keterangan'],
+            'tanggal': transaksi['tanggal'].isoformat() if transaksi['tanggal'] else None,
+            'bukti_bayar': transaksi['bukti_bayar'],
+            'warga_id': transaksi['warga_id'],
+            'petugas_id': transaksi['petugas_id'],
+            'laporan_id': transaksi['laporan_id'],
+            'nama_warga': transaksi['nama_warga'],
+            'telepon_warga': transaksi['telepon_warga'],
+            'alamat_warga': transaksi['alamat_warga'],
+            'rt_warga': transaksi['rt_warga'],
+            'rw_warga': transaksi['rw_warga'],
+            'nama_petugas': transaksi['nama_petugas'],
+            'telepon_petugas': transaksi['telepon_petugas'],
+            'jenis_sampah': transaksi['jenis_sampah'],
+            'total_karung': transaksi['total_karung'],
+            'foto_bukti': transaksi['foto_bukti']
+        }
+        
+        return jsonify({
+            'success': True,
+            'data': formatted_transaksi
+        }), 200
+        
+    except Exception as e:
+        print(f"Error get_transaksi_detail: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Gagal mengambil detail transaksi',
+            'error': str(e)
+        }), 500
