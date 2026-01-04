@@ -558,3 +558,108 @@ def format_date_display(date_str):
             return f"{day_name}, {date_obj.strftime('%d %B')}"
     except:
         return str(date_str)
+    
+# routes/jadwal.py - Tambah endpoint baru
+@jadwal_bp.route('/petugas/<int:petugas_id>', methods=['GET'])
+def get_jadwal_by_petugas(petugas_id):
+    """Get jadwal berdasarkan petugas"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Parameter untuk filtering
+            tanggal = request.args.get('tanggal', '')
+            status = request.args.get('status', 'aktif')
+            
+            print(f"Fetching jadwal for petugas_id: {petugas_id}, tanggal: {tanggal}, status: {status}")
+            
+            # Base query - UBAH QUERY INI
+            sql = """
+                SELECT DISTINCT
+                    j.id,
+                    DATE_FORMAT(j.tanggal, '%%Y-%%m-%%d') as tanggal,
+                    TIME_FORMAT(j.jam_mulai, '%%H:%%i') as jam_mulai,
+                    TIME_FORMAT(j.jam_selesai, '%%H:%%i') as jam_selesai,
+                    j.wilayah,
+                    j.keterangan,
+                    j.status,
+                    GROUP_CONCAT(DISTINCT p.nama_lengkap SEPARATOR ', ') as nama_petugas
+                FROM jadwal j
+                INNER JOIN jadwal_petugas jp ON j.id = jp.jadwal_id
+                LEFT JOIN petugas p ON jp.petugas_id = p.id
+                WHERE jp.petugas_id = %s
+            """
+            
+            params = [petugas_id]
+            
+            # Filter tanggal
+            if tanggal:
+                sql += " AND DATE(j.tanggal) = %s"
+                params.append(tanggal)
+            else:
+                # Default: jadwal hari ini dan yang akan datang
+                sql += " AND DATE(j.tanggal) >= CURDATE()"
+            
+            # Filter status
+            if status:
+                sql += " AND j.status = %s"
+                params.append(status)
+            
+            sql += """
+                GROUP BY j.id, j.tanggal, j.jam_mulai, j.jam_selesai, j.wilayah, j.keterangan, j.status
+                ORDER BY j.tanggal ASC, j.jam_mulai ASC
+                LIMIT 10
+            """
+            
+            print(f"SQL Query: {sql}")
+            print(f"Params: {params}")
+            
+            cursor.execute(sql, params)
+            rows = cursor.fetchall()
+            
+            print(f"Found {len(rows)} jadwal records")
+            
+            # Format untuk frontend
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            tomorrow_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+            
+            for row in rows:
+                row['is_today'] = row['tanggal'] == today_str
+                row['is_tomorrow'] = row['tanggal'] == tomorrow_str
+                
+                # Format display date
+                try:
+                    date_obj = datetime.strptime(row['tanggal'], '%Y-%m-%d')
+                    days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+                    day_name = days[date_obj.weekday()]
+                    
+                    if row['is_today']:
+                        row['tanggal_display'] = f"Hari Ini ({day_name})"
+                    elif row['is_tomorrow']:
+                        row['tanggal_display'] = f"Besok ({day_name})"
+                    else:
+                        row['tanggal_display'] = f"{day_name}, {date_obj.strftime('%d %b %Y')}"
+                except:
+                    row['tanggal_display'] = row['tanggal']
+            
+            return jsonify({
+                "success": True,
+                "message": f"Found {len(rows)} jadwal",
+                "data": rows,
+                "debug": {
+                    "petugas_id": petugas_id,
+                    "tanggal_param": tanggal,
+                    "status_param": status
+                }
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_jadwal_by_petugas: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False, 
+            "message": f"Server error: {str(e)}",
+            "data": []
+        }), 500
+    finally:
+        conn.close()

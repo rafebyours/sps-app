@@ -219,7 +219,7 @@ def get_all_laporan(current_user):
         cursor.execute("""
             SELECT 
                 l.*,
-                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai, j.nama_petugas,
+                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai,
                 w.nama_lengkap as nama_warga, w.no_telepon as telp_warga,
                 u.username
             FROM laporan l
@@ -271,6 +271,7 @@ def get_all_laporan(current_user):
         }), 500
 
 # 3. GET LAPORAN BY ID (GET)
+# 3. GET LAPORAN BY ID (GET)
 @laporan_bp.route('/<int:id>', methods=['GET'])
 @token_required
 def get_laporan(current_user, id):
@@ -278,12 +279,20 @@ def get_laporan(current_user, id):
         conn = get_connection()
         cursor = conn.cursor()
         
+        print(f"🔍 GET /api/laporan/{id} called")
+        
         cursor.execute("""
             SELECT 
                 l.*,
-                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai, j.nama_petugas,
-                w.nama_lengkap as nama_warga, w.no_telepon as telp_warga, w.alamat_lengkap as alamat_warga,
-                u.username, u.email
+                j.tanggal as tanggal_jadwal, 
+                j.wilayah, 
+                j.jam_mulai, 
+                j.jam_selesai,
+                w.nama_lengkap as nama_warga, 
+                w.no_telepon as telp_warga, 
+                w.alamat_lengkap as alamat_warga,
+                u.username, 
+                u.email
             FROM laporan l
             LEFT JOIN jadwal j ON l.id_jadwal = j.id
             LEFT JOIN warga w ON l.id_warga = w.id
@@ -295,10 +304,13 @@ def get_laporan(current_user, id):
         conn.close()
         
         if not laporan:
+            print(f"❌ Laporan {id} not found")
             return jsonify({
                 'success': False,
                 'message': 'Laporan tidak ditemukan'
             }), 404
+        
+        print(f"✅ Laporan {id} found: {laporan.get('kode_laporan')}")
         
         # Format response
         response_data = {
@@ -331,7 +343,6 @@ def get_laporan(current_user, id):
             'tanggal_jadwal': laporan['tanggal_jadwal'].isoformat() if laporan['tanggal_jadwal'] else None,
             'jam_mulai': str(laporan['jam_mulai']) if laporan['jam_mulai'] else None,
             'jam_selesai': str(laporan['jam_selesai']) if laporan['jam_selesai'] else None,
-            'nama_petugas': laporan['nama_petugas']
         }
         
         return jsonify({
@@ -340,7 +351,9 @@ def get_laporan(current_user, id):
         }), 200
         
     except Exception as e:
-        print(f"Error in get_laporan: {str(e)}")
+        print(f"❌ Error in get_laporan: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'message': 'Terjadi kesalahan saat mengambil data laporan'
@@ -422,7 +435,7 @@ def get_laporan_by_warga(current_user, warga_id):
         cursor.execute("""
             SELECT 
                 l.*,
-                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai, j.nama_petugas
+                j.tanggal as tanggal_jadwal, j.wilayah, j.jam_mulai, j.jam_selesai,
             FROM laporan l
             LEFT JOIN jadwal j ON l.id_jadwal = j.id
             WHERE l.id_warga = %s
@@ -526,4 +539,110 @@ def get_laporan_stats(current_user):
         return jsonify({
             'success': False,
             'message': 'Terjadi kesalahan saat mengambil statistik laporan'
+        }), 500
+        
+# routes/laporan.py - Tambah endpoint baru
+@laporan_bp.route('/by-petugas/<int:petugas_id>', methods=['GET'])
+@token_required
+def get_laporan_by_petugas(current_user, petugas_id):
+    """Get laporan berdasarkan jadwal petugas"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Parameter
+        status = request.args.get('status', '')
+        tanggal = request.args.get('tanggal', '')
+        
+        print(f"🔍 get_laporan_by_petugas - Petugas ID: {petugas_id}")
+        print(f"🔍 Status filter: {status}")
+        print(f"🔍 Tanggal filter: {tanggal}")
+        
+        # Query yang lebih sederhana dan jelas
+        query = """
+            SELECT 
+                l.*,
+                j.tanggal as tanggal_jadwal,
+                j.wilayah,
+                w.nama_lengkap as nama_warga,
+                p.nama_lengkap as nama_petugas
+            FROM laporan l
+            INNER JOIN jadwal j ON l.id_jadwal = j.id
+            INNER JOIN jadwal_petugas jp ON j.id = jp.jadwal_id
+            LEFT JOIN warga w ON l.id_warga = w.id
+            LEFT JOIN petugas p ON jp.petugas_id = p.id
+            WHERE jp.petugas_id = %s
+        """
+        
+        params = [petugas_id]
+        
+        # Filter status
+        if status:
+            if ',' in status:
+                status_list = status.split(',')
+                placeholders = ','.join(['%s'] * len(status_list))
+                query += f" AND l.status IN ({placeholders})"
+                params.extend(status_list)
+            else:
+                query += " AND l.status = %s"
+                params.append(status)
+        else:
+            # Default hanya menunggu dan diproses
+            query += " AND l.status IN ('menunggu', 'diproses')"
+        
+        # Filter tanggal
+        if tanggal:
+            query += " AND DATE(j.tanggal) = %s"
+            params.append(tanggal)
+        else:
+            # Default hari ini
+            query += " AND DATE(j.tanggal) = CURDATE()"
+        
+        query += " ORDER BY l.tanggal_laporan DESC"
+        
+        print(f"🔍 SQL Query: {query}")
+        print(f"🔍 Params: {params}")
+        
+        cursor.execute(query, params)
+        laporan_list = cursor.fetchall()
+        
+        print(f"🔍 Found {len(laporan_list)} laporan records")
+        
+        conn.close()
+        
+        # Format response
+        formatted_data = []
+        for laporan in laporan_list:
+            formatted_data.append({
+                'id': laporan['id'],
+                'original_id': laporan['id'],
+                'nama_pemohon': laporan.get('nama_pemohon'),
+                'nama_warga': laporan.get('nama_warga'),
+                'alamat_detail': laporan.get('alamat_detail'),
+                'alamat': laporan.get('alamat'),
+                'jenis_sampah': laporan.get('jenis_sampah'),
+                'jumlah_karung': laporan.get('jumlah_karung'),
+                'estimasi_volume': laporan.get('estimasi_volume'),
+                'status': laporan['status'],
+                'tanggal_laporan': laporan['tanggal_laporan'].isoformat() if laporan['tanggal_laporan'] else None,
+                'waktu_pengambilan': laporan.get('waktu_pengambilan'),
+                'tanggal_jadwal': laporan['tanggal_jadwal'].isoformat() if laporan['tanggal_jadwal'] else None,
+                'wilayah': laporan.get('wilayah')
+            })
+        
+        return jsonify({
+            'success': True,
+            'message': f'Found {len(formatted_data)} laporan',
+            'data': formatted_data
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error in get_laporan_by_petugas: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat mengambil data laporan',
+            'error': str(e),
+            'data': []
         }), 500

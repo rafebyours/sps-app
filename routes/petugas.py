@@ -1331,3 +1331,38 @@ def get_transaksi_detail(current_user, transaksi_id):
             'message': 'Gagal mengambil detail transaksi',
             'error': str(e)
         }), 500
+        
+@petugas_bp.route('/by-user/<int:user_id>', methods=['GET'])
+@token_required
+def get_petugas_by_user_id(current_user, user_id):
+    """Get petugas by user_id"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT p.*
+            FROM petugas p
+            WHERE p.user_id = %s
+        """, (user_id,))
+        
+        petugas = cursor.fetchone()
+        conn.close()
+        
+        if not petugas:
+            return jsonify({
+                'success': False,
+                'message': 'Petugas tidak ditemukan'
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'data': petugas
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in get_petugas_by_user_id: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Terjadi kesalahan saat mengambil data petugas'
+        }), 500
