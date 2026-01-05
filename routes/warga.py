@@ -789,3 +789,52 @@ def get_warga_by_user_id(user_id):
         }), 500
     finally:
         conn.close()
+        
+        
+# 9. GET WARGA LIST UNTUK DROPDOWN (simple)
+# Di warga.py (TAMBAHKAN setelah fungsi-fungsi lain):
+# 9. GET WARGA LIST FOR DROPDOWN
+# 9. GET WARGA LIST FOR DROPDOWN
+@warga_bp.route('/list', methods=['GET'])
+@token_required
+def get_warga_list(current_user):
+    try:
+        print("=== GET WARGA LIST ENDPOINT CALLED ===")
+        print(f"Current user: {current_user}")
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                w.id,
+                w.nama_lengkap,
+                w.alamat_lengkap,
+                w.rt,
+                w.rw,
+                w.saldo,
+                w.no_telepon
+            FROM warga w
+            JOIN users u ON w.user_id = u.id
+            WHERE u.status = 'active'
+            ORDER BY w.nama_lengkap ASC
+        """)
+        
+        warga_list = cursor.fetchall()
+        conn.close()
+        
+        print(f"Found {len(warga_list)} warga")
+        
+        return jsonify({
+            'success': True,
+            'data': warga_list,
+            'count': len(warga_list)
+        }), 200
+        
+    except Exception as e:
+        print(f"Error get_warga_list: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Gagal mengambil data warga',
+            'error': str(e)
+        }), 500

@@ -66,7 +66,7 @@ def format_tanggal_lengkap(tanggal_str):
     try:
         if isinstance(tanggal_str, str):
             try:
-                tanggal = datetime.strptime(tanggal_str, '%Y-%m-d %H:%M:%S')
+                tanggal = datetime.strptime(tanggal_str, '%Y-%m-%d %H:%M:%S')
             except:
                 tanggal = datetime.strptime(tanggal_str, '%Y-%m-%d')
         else:
@@ -137,7 +137,6 @@ def get_riwayat_user(current_user):
                 FROM laporan l
                 JOIN warga w ON l.id_warga = w.id
                 WHERE l.id_warga = %s
-                AND l.status NOT IN ('selesai', 'dibatalkan')
             """
             params_laporan = [id_warga]
             

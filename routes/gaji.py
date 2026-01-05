@@ -324,7 +324,11 @@ def simpan_gaji():
             cursor.execute("DELETE FROM riwayat_gaji WHERE jadwal_id = %s", (jadwal_id,))
             deleted_old = cursor.rowcount
             
-            # 3. INSERT DATA BARU ke riwayat_gaji
+            # 3. HAPUS DATA TRANSAKSI LAMA untuk jadwal ini
+            cursor.execute("DELETE FROM transaksi WHERE laporan_id IS NULL AND jadwal_id = %s", (jadwal_id,))
+            deleted_old_transaksi = cursor.rowcount
+            
+            # 4. INSERT DATA BARU ke riwayat_gaji
             for item in items_to_save:
                 cursor.execute("""
                     INSERT INTO riwayat_gaji 
@@ -338,7 +342,46 @@ def simpan_gaji():
                     item['keterangan']
                 ))
             
-            # 4. HANDLE PENGELUARAN
+            # 5. BUAT DATA TRANSAKSI untuk setiap petugas
+            transaksi_ids = []
+            for item in items_to_save:
+                # Generate kode transaksi unik
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                kode_transaksi = f"GJI-{jadwal_id}-{item['petugas_id']}-{timestamp}"
+                
+                # Ambil data petugas untuk keterangan
+                cursor.execute("SELECT nama_lengkap FROM petugas WHERE id = %s", (item['petugas_id'],))
+                petugas = cursor.fetchone()
+                nama_petugas = petugas['nama_lengkap'] if petugas else f"Petugas {item['petugas_id']}"
+                
+                # Buat keterangan transaksi
+                keterangan_transaksi = item.get('keterangan', '') or f"Gaji petugas {nama_petugas}"
+                
+                # Insert ke tabel transaksi
+                cursor.execute("""
+                    INSERT INTO transaksi 
+                    (kode_transaksi, jadwal_id, petugas_id, jenis, kategori, 
+                     jumlah, harga_per_karung, total_karung, metode_bayar, 
+                     status_bayar, keterangan, tanggal)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    kode_transaksi,
+                    jadwal_id,
+                    item['petugas_id'],
+                    'gaji',  # Jenis transaksi: gaji
+                    'Gaji Petugas',  # Kategori
+                    item['gaji'],  # Jumlah gaji
+                    0,  # harga_per_karung: 0 untuk gaji
+                    0,  # total_karung: 0 untuk gaji
+                    'cash',  # metode_bayar default
+                    'lunas',  # status_bayar default untuk gaji
+                    keterangan_transaksi,
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ))
+                
+                transaksi_ids.append(cursor.lastrowid)
+            
+            # 6. HANDLE PENGELUARAN (sebagai ringkasan)
             reference_id = f"gaji_{jadwal_id}"
             
             # Cek apakah sudah ada
@@ -354,12 +397,12 @@ def simpan_gaji():
             jadwal_info = cursor.fetchone()
             wilayah = jadwal_info['wilayah'] if jadwal_info else f"Jadwal {jadwal_id}"
             
-            # Buat keterangan
-            keterangan = data.get('keterangan_umum', 
-                f"Gaji {len(items_to_save)} petugas - {wilayah}")
+            # Buat keterangan pengeluaran
+            keterangan_pengeluaran = data.get('keterangan_umum', 
+                f"Gaji {len(items_to_save)} petugas - {wilayah} ({', '.join([str(i['petugas_id']) for i in items_to_save])})")
             
             if existing:
-                # UPDATE yang sudah ada
+                # UPDATE pengeluaran yang sudah ada
                 cursor.execute("""
                     UPDATE pengeluaran 
                     SET tanggal = %s, 
@@ -369,13 +412,13 @@ def simpan_gaji():
                 """, (
                     tanggal_bayar,
                     total_gaji,
-                    keterangan,
+                    keterangan_pengeluaran,
                     reference_id
                 ))
                 expense_action = "diperbarui"
                 expense_id = existing['id']
             else:
-                # INSERT baru
+                # INSERT pengeluaran baru
                 cursor.execute("""
                     INSERT INTO pengeluaran 
                     (reference_id, tanggal, jumlah, kategori, keterangan)
@@ -385,7 +428,7 @@ def simpan_gaji():
                     tanggal_bayar,
                     total_gaji,
                     "Gaji Petugas",
-                    keterangan
+                    keterangan_pengeluaran
                 ))
                 expense_action = "dicatat"
                 expense_id = cursor.lastrowid
@@ -400,13 +443,18 @@ def simpan_gaji():
                     "petugas_count": len(items_to_save),
                     "expense_id": expense_id,
                     "expense_action": expense_action,
-                    "deleted_old_records": deleted_old
+                    "transaksi_count": len(transaksi_ids),
+                    "transaksi_ids": transaksi_ids,
+                    "deleted_old_records": deleted_old,
+                    "deleted_old_transaksi": deleted_old_transaksi
                 }
             }), 200
             
     except Exception as e:
         conn.rollback()
         print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "success": False,
             "message": "Gagal menyimpan data",
@@ -518,23 +566,35 @@ def hapus_pengeluaran_gaji(jadwal_id):
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            reference_id = f"GJI_{jadwal_id}"
+            reference_id = f"gaji_{jadwal_id}"
             
+            # 1. Hapus dari pengeluaran
             cursor.execute("DELETE FROM pengeluaran WHERE reference_id = %s", (reference_id,))
-            deleted_count = cursor.rowcount
+            deleted_pengeluaran = cursor.rowcount
             
-            # Optional: hapus juga dari riwayat_gaji
-            # cursor.execute("DELETE FROM riwayat_gaji WHERE jadwal_id = %s", (jadwal_id,))
+            # 2. Hapus dari transaksi (gaji)
+            cursor.execute("DELETE FROM transaksi WHERE jadwal_id = %s AND jenis = 'gaji'", (jadwal_id,))
+            deleted_transaksi = cursor.rowcount
+            
+            # 3. Hapus dari riwayat_gaji
+            cursor.execute("DELETE FROM riwayat_gaji WHERE jadwal_id = %s", (jadwal_id,))
+            deleted_riwayat = cursor.rowcount
             
             conn.commit()
             
             return jsonify({
                 "success": True,
-                "message": f"Berhasil menghapus {deleted_count} record pengeluaran"
+                "message": f"Berhasil menghapus {deleted_transaksi} transaksi gaji, {deleted_pengeluaran} pengeluaran, dan {deleted_riwayat} riwayat gaji",
+                "data": {
+                    "deleted_transaksi": deleted_transaksi,
+                    "deleted_pengeluaran": deleted_pengeluaran,
+                    "deleted_riwayat": deleted_riwayat
+                }
             }), 200
             
     except Exception as e:
         conn.rollback()
+        print(f"Error in hapus_pengeluaran_gaji: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         conn.close()
@@ -825,6 +885,134 @@ def get_stats_bulanan_petugas(petugas_id):
         return jsonify({
             "success": False,
             "message": "Gagal mengambil statistik bulanan"
+        }), 500
+    finally:
+        conn.close()
+
+@gaji_bp.route('/transaksi-gaji/<int:jadwal_id>', methods=['GET'])
+def get_transaksi_gaji_by_jadwal(jadwal_id):
+    """Get all gaji transactions for a schedule"""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT 
+                    t.*,
+                    p.nama_lengkap as nama_petugas,
+                    j.wilayah,
+                    DATE_FORMAT(t.tanggal, '%%d-%%m-%%Y %%H:%%i') as tanggal_format
+                FROM transaksi t
+                INNER JOIN petugas p ON t.petugas_id = p.id
+                LEFT JOIN jadwal j ON t.jadwal_id = j.id
+                WHERE t.jadwal_id = %s 
+                AND t.jenis = 'gaji'
+                ORDER BY t.tanggal DESC
+            """, (jadwal_id,))
+            
+            rows = cursor.fetchall()
+            
+            # Format response
+            result = []
+            for row in rows:
+                result.append({
+                    'id': row['id'],
+                    'kode_transaksi': row['kode_transaksi'],
+                    'petugas_id': row['petugas_id'],
+                    'nama_petugas': row['nama_petugas'],
+                    'jumlah': float(row['jumlah']) if row['jumlah'] else 0,
+                    'jumlah_formatted': f"Rp {float(row['jumlah'] or 0):,.0f}",
+                    'keterangan': row['keterangan'],
+                    'status_bayar': row['status_bayar'],
+                    'metode_bayar': row['metode_bayar'],
+                    'tanggal': row['tanggal'].strftime('%Y-%m-%d %H:%M:%S') if row['tanggal'] else '',
+                    'tanggal_format': row['tanggal_format'],
+                    'wilayah': row['wilayah']
+                })
+            
+            return jsonify({
+                "success": True,
+                "data": result,
+                "count": len(result),
+                "message": f"Found {len(result)} gaji transactions for schedule {jadwal_id}"
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_transaksi_gaji_by_jadwal: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal mengambil data transaksi gaji"
+        }), 500
+    finally:
+        conn.close()
+
+
+@gaji_bp.route('/total-gaji-bulanan', methods=['GET'])
+def get_total_gaji_bulanan():
+    """Get total gaji per month from transaksi table"""
+    year = request.args.get('year', datetime.now().year)
+    
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT 
+                    YEAR(tanggal) as tahun,
+                    MONTH(tanggal) as bulan,
+                    COUNT(*) as jumlah_transaksi,
+                    SUM(jumlah) as total_gaji,
+                    DATE_FORMAT(MIN(tanggal), '%%d %%M %%Y') as tanggal_awal,
+                    DATE_FORMAT(MAX(tanggal), '%%d %%M %%Y') as tanggal_akhir
+                FROM transaksi
+                WHERE jenis = 'gaji'
+                AND YEAR(tanggal) = %s
+                GROUP BY YEAR(tanggal), MONTH(tanggal)
+                ORDER BY tahun DESC, bulan DESC
+            """, (year,))
+            
+            rows = cursor.fetchall()
+            
+            # Format response
+            bulan_names = {
+                1: 'Januari', 2: 'Februari', 3: 'Maret', 4: 'April',
+                5: 'Mei', 6: 'Juni', 7: 'Juli', 8: 'Agustus',
+                9: 'September', 10: 'Oktober', 11: 'November', 12: 'Desember'
+            }
+            
+            result = []
+            total_tahun = 0
+            
+            for row in rows:
+                total_gaji = float(row['total_gaji']) if row['total_gaji'] else 0
+                total_tahun += total_gaji
+                
+                result.append({
+                    'tahun': row['tahun'],
+                    'bulan': row['bulan'],
+                    'bulan_nama': bulan_names.get(row['bulan'], f"Bulan {row['bulan']}"),
+                    'jumlah_transaksi': row['jumlah_transaksi'] or 0,
+                    'total_gaji': total_gaji,
+                    'total_gaji_formatted': f"Rp {total_gaji:,.0f}",
+                    'tanggal_awal': row['tanggal_awal'],
+                    'tanggal_akhir': row['tanggal_akhir'],
+                    'periode': f"{bulan_names.get(row['bulan'], '')} {row['tahun']}"
+                })
+            
+            return jsonify({
+                "success": True,
+                "data": {
+                    "monthly_totals": result,
+                    "yearly_total": total_tahun,
+                    "yearly_total_formatted": f"Rp {total_tahun:,.0f}",
+                    "year": year
+                },
+                "message": f"Total gaji bulanan tahun {year}"
+            }), 200
+            
+    except Exception as e:
+        print(f"Error in get_total_gaji_bulanan: {e}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal menghitung total gaji bulanan"
         }), 500
     finally:
         conn.close()

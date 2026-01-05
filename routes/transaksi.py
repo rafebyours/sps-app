@@ -158,7 +158,7 @@ def create_pengambilan(current_user):
                 print(f"✅ Update saldo warga ID: {data['warga_id']}")
                 update_warga_query = """
                     UPDATE warga 
-                    SET saldo = COALESCE(saldo, 0) - %s
+                    SET saldo = COALESCE(saldo, 0) + %s
                     WHERE id = %s
                 """
                 

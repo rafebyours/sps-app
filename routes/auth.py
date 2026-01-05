@@ -58,7 +58,6 @@ def login():
     try:
         data = request.json
         
-        # Validate input
         if not data:
             return jsonify({"message": "No data provided"}), 400
         
@@ -68,12 +67,11 @@ def login():
         if not username or not password:
             return jsonify({"message": "Username and password are required"}), 400
         
-        # Get database connection
         conn = get_connection()
         
         try:
             with conn.cursor() as cursor:
-                # Query to get user with role-specific data
+                # QUERY LENGKAP - ambil semua data warga sekaligus
                 cursor.execute("""
                     SELECT 
                         u.id,
@@ -82,23 +80,20 @@ def login():
                         u.role,
                         u.status,
                         u.created_at,
-                        CASE 
-                            WHEN u.role = 'warga' THEN w.nama_lengkap
-                            WHEN u.role = 'petugas' THEN p.nama_lengkap
-                            ELSE NULL 
-                        END as nama,
-                        CASE 
-                            WHEN u.role = 'warga' THEN w.saldo
-                            ELSE NULL 
-                        END as saldo,
-                        CASE 
-                            WHEN u.role = 'warga' THEN w.no_telepon
-                            WHEN u.role = 'petugas' THEN p.no_telepon
-                            ELSE NULL 
-                        END as no_telepon
+                        w.id as warga_id,
+                        w.nama_lengkap as warga_nama,
+                        w.alamat_lengkap,
+                        w.rt,
+                        w.rw,
+                        w.kelurahan,
+                        w.saldo,
+                        w.no_telepon,
+                        p.id as petugas_id,
+                        p.nama_lengkap as petugas_nama,
+                        p.no_telepon as petugas_no_telepon
                     FROM users u
-                    LEFT JOIN warga w ON u.id = w.user_id AND u.role = 'warga'
-                    LEFT JOIN petugas p ON u.id = p.user_id AND u.role = 'petugas'
+                    LEFT JOIN warga w ON u.id = w.user_id
+                    LEFT JOIN petugas p ON u.id = p.user_id
                     WHERE u.username = %s
                 """, (username,))
                 
@@ -107,42 +102,63 @@ def login():
         finally:
             conn.close()
         
-        # Check if user exists
         if not user:
             return jsonify({"message": "User not found"}), 404
         
-        # Check if account is active
         if user['status'] != 'active':
             return jsonify({"message": "Account is inactive"}), 403
         
-        # Verify password
         if not check_password_hash(user['password'], password):
             return jsonify({"message": "Invalid password"}), 401
         
-        # Create token payload
+        # Tentukan data berdasarkan role
+        if user['role'] == 'warga':
+            nama = user['warga_nama']
+            telepon = user['no_telepon']
+            id_spesifik = user['warga_id']
+        elif user['role'] == 'petugas':
+            nama = user['petugas_nama']
+            telepon = user['petugas_no_telepon']
+            id_spesifik = user['petugas_id']
+        else:
+            nama = None
+            telepon = None
+            id_spesifik = None
+        
+        # Token payload
         payload = {
             "id": user['id'],
             "username": user['username'],
             "role": user['role'],
-            "nama": user.get('nama'),
-            "no_telepon": user.get('no_telepon'),
-            "saldo": float(user.get('saldo', 0)) if user.get('saldo') is not None else None,
+            "nama": nama,
+            "no_telepon": telepon,
+            "saldo": float(user['saldo']) if user['saldo'] is not None else None,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         }
         
         # Generate token
         token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
         
-        # Prepare user data for response (without password)
+        # User data untuk response - SEMUA DATA WARGA DIMASUKKAN
         user_data = {
             "id": user['id'],
             "username": user['username'],
             "role": user['role'],
-            "nama": user.get('nama'),
-            "no_telepon": user.get('no_telepon'),
-            "saldo": float(user.get('saldo', 0)) if user.get('saldo') is not None else None,
+            "nama": nama,
+            "no_telepon": telepon,
+            "saldo": float(user['saldo']) if user['saldo'] is not None else None,
             "created_at": user['created_at'].isoformat() if user.get('created_at') else None
         }
+        
+        # Tambah data lengkap untuk warga
+        if user['role'] == 'warga':
+            user_data.update({
+                "warga_id": user['warga_id'],
+                "alamat": user['alamat_lengkap'],
+                "rt": user['rt'],
+                "rw": user['rw'],
+                "wilayah": user['kelurahan'] or 'Suraja'
+            })
         
         return jsonify({
             "success": True,

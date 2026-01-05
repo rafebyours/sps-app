@@ -646,3 +646,42 @@ def get_laporan_by_petugas(current_user, petugas_id):
             'error': str(e),
             'data': []
         }), 500
+        
+# routes/laporan.py
+@laporan_bp.route('/<int:id>', methods=['DELETE'])
+@token_required
+def delete_laporan(current_user, id):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Cek apakah laporan ada dan milik petugas/warga
+        cursor.execute("""
+            SELECT l.*, p.user_id as petugas_user_id, w.user_id as warga_user_id
+            FROM laporan l
+            LEFT JOIN petugas p ON l.petugas_id = p.id
+            LEFT JOIN warga w ON l.id_warga = w.id
+            WHERE l.id = %s
+        """, (id,))
+        
+        laporan = cursor.fetchone()
+        
+        if not laporan:
+            return jsonify({"success": False, "message": "Laporan tidak ditemukan"}), 404
+        
+        # Hapus laporan
+        cursor.execute("DELETE FROM laporan WHERE id = %s", (id,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "message": "Laporan berhasil dihapus"
+        }), 200
+        
+    except Exception as e:
+        print(f"Error delete_laporan: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": "Gagal menghapus laporan"
+        }), 500
