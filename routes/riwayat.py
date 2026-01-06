@@ -89,11 +89,11 @@ def format_tanggal_lengkap(tanggal_str):
 @token_required
 def get_riwayat_user(current_user):
     try:
-        bulan = request.args.get('bulan')  # Format: YYYY-MM
-        tahun = request.args.get('tahun')  # Format: YYYY
+        bulan = request.args.get('bulan')
+        tahun = request.args.get('tahun')
         page = request.args.get('page', 1, type=int)
         limit = request.args.get('limit', 20, type=int)
-        tipe = request.args.get('tipe')  # 'laporan' atau 'transaksi' atau None (semua)
+        tipe = request.args.get('tipe')
         
         offset = (page - 1) * limit
         
@@ -112,7 +112,6 @@ def get_riwayat_user(current_user):
         # ============ DATA LAPORAN ============
         laporan_data = []
         if not tipe or tipe == 'laporan':
-            # PERBAIKAN: Tidak ada kolom id_petugas di laporan, hapus JOIN dengan petugas
             sql_laporan = """
                 SELECT 
                     l.id,
@@ -153,15 +152,10 @@ def get_riwayat_user(current_user):
             laporan_rows = cursor.fetchall()
             
             for row in laporan_rows:
-                # Format estimasi volume ke jumlah karung
                 estimasi_volume = row['estimasi_volume']
-                jumlah_karung = 0
-                if estimasi_volume == 'sedikit':
-                    jumlah_karung = 1
-                elif estimasi_volume == 'sedang':
-                    jumlah_karung = 2
-                elif estimasi_volume == 'banyak':
-                    jumlah_karung = 3
+                
+                # PERBAIKAN: JANGAN konversi ke angka, kirim langsung estimasi_volume
+                # Frontend akan handle sendiri penampilannya
                 
                 # Format status
                 status_map = {
@@ -177,20 +171,20 @@ def get_riwayat_user(current_user):
                     'id': row['id'],
                     'kode': row['kode'],
                     'tipe': 'laporan',
-                    'jenis': 'Pengambilan Sampah',
-                    'jumlah_karung': jumlah_karung,
+                    'jenis': 'Laporan Sampah',  # Fixed label
+                    'jumlah_karung': 0,  # Untuk laporan, selalu 0 (gunakan estimasi_volume)
+                    'estimasi_volume': estimasi_volume,  # Kirim estimasi_volume asli
                     'status': status,
                     'catatan': row['keterangan'] or row['catatan_petugas'] or '',
                     'tanggal': row['tanggal'].strftime('%Y-%m-%d %H:%M:%S') if row['tanggal'] else None,
                     'tanggal_verifikasi': row['tanggal_verifikasi'].strftime('%Y-%m-%d %H:%M:%S') if row['tanggal_verifikasi'] else None,
                     'tanggal_selesai': row['tanggal_selesai'].strftime('%Y-%m-%d %H:%M:%S') if row['tanggal_selesai'] else None,
                     'petugas': {
-                        'nama': 'Belum ditugaskan',  # Karena tidak ada petugas di laporan
+                        'nama': 'Belum ditugaskan',
                         'telp': ''
                     },
                     'waktu_pengambilan': row['waktu_pengambilan'],
                     'jenis_sampah': row['jenis_sampah'],
-                    'estimasi_volume': estimasi_volume,
                     'alamat': row['alamat_detail'] or '',
                     'rt': row['rt'],
                     'rw': row['rw'],
@@ -267,7 +261,8 @@ def get_riwayat_user(current_user):
                     'kode': row['kode'],
                     'tipe': 'transaksi',
                     'jenis': jenis_transaksi,
-                    'jumlah_karung': row['total_karung'] or 0,
+                    'jumlah_karung': row['total_karung'] or 0,  # Untuk transaksi, kirim angka
+                    'total_karung': row['total_karung'] or 0,  # Tambah field khusus untuk transaksi
                     'status': status,
                     'catatan': row['catatan'] or '',
                     'tanggal': row['tanggal'].strftime('%Y-%m-%d %H:%M:%S') if row['tanggal'] else None,
@@ -505,13 +500,7 @@ def get_stats_user(current_user):
         sql_laporan = f"""
             SELECT 
                 status,
-                COUNT(*) as count,
-                SUM(CASE 
-                    WHEN estimasi_volume = 'sedikit' THEN 1
-                    WHEN estimasi_volume = 'sedang' THEN 2
-                    WHEN estimasi_volume = 'banyak' THEN 3
-                    ELSE 1
-                END) as total_karung
+                COUNT(*) as count
             FROM laporan 
             {where_laporan}
             GROUP BY status
@@ -519,7 +508,7 @@ def get_stats_user(current_user):
         cursor.execute(sql_laporan, params)
         laporan_stats = cursor.fetchall()
         
-        # Stats for transaksi
+        # Stats for transaksi - PERBAIKAN: hitung karung hanya dari transaksi
         sql_transaksi = f"""
             SELECT 
                 jenis,
@@ -533,43 +522,46 @@ def get_stats_user(current_user):
         cursor.execute(sql_transaksi, params_transaksi)
         transaksi_stats = cursor.fetchall()
         
-        # Total laporan dan karung
+        # Total laporan
         sql_total_laporan = f"SELECT COUNT(*) as total FROM laporan {where_laporan}"
         cursor.execute(sql_total_laporan, params)
         total_laporan = cursor.fetchone()['total']
         
-        sql_total_karung = f"""
-            SELECT SUM(CASE 
-                WHEN estimasi_volume = 'sedikit' THEN 1
-                WHEN estimasi_volume = 'sedang' THEN 2
-                WHEN estimasi_volume = 'banyak' THEN 3
-                ELSE 1
-            END) as total_karung 
-            FROM laporan 
-            {where_laporan}
+        # Total transaksi dan karung
+        sql_total_transaksi = f"""
+            SELECT 
+                COUNT(*) as total,
+                SUM(total_karung) as total_karung
+            FROM transaksi 
+            {where_transaksi}
         """
-        cursor.execute(sql_total_karung, params)
-        total_karung_laporan = cursor.fetchone()['total_karung'] or 0
-        
-        # Total transaksi
-        sql_total_transaksi = f"SELECT COUNT(*) as total FROM transaksi {where_transaksi}"
         cursor.execute(sql_total_transaksi, params_transaksi)
-        total_transaksi = cursor.fetchone()['total']
+        total_transaksi_result = cursor.fetchone()
+        total_transaksi = total_transaksi_result['total'] or 0
+        total_karung_transaksi = total_transaksi_result['total_karung'] or 0
         
         # Format status stats
         status_counts = {}
         for item in laporan_stats:
             status_counts[item['status']] = {
-                'count': item['count'],
-                'total_karung': item['total_karung'] or 0
+                'count': item['count']
             }
         
         # Format transaksi stats
         transaksi_counts = {}
+        total_pemasukan = 0
+        total_pengeluaran = 0
+        
         for item in transaksi_stats:
+            total_jumlah = float(item['total_jumlah']) if item['total_jumlah'] else 0
+            if item['jenis'] == 'pemasukan':
+                total_pemasukan += total_jumlah
+            elif item['jenis'] == 'pengeluaran':
+                total_pengeluaran += total_jumlah
+            
             transaksi_counts[item['jenis']] = {
                 'count': item['count'],
-                'total_jumlah': float(item['total_jumlah']) if item['total_jumlah'] else 0,
+                'total_jumlah': total_jumlah,
                 'total_karung': item['total_karung'] or 0
             }
         
@@ -582,14 +574,13 @@ def get_stats_user(current_user):
                     "total": total_laporan,
                     "menunggu": status_counts.get('menunggu', {'count': 0})['count'],
                     "diproses": status_counts.get('diproses', {'count': 0})['count'],
-                    "totalKarung": total_karung_laporan,
                     "statusStats": status_counts
                 },
                 "transaksi": {
                     "total": total_transaksi,
-                    "pemasukan": transaksi_counts.get('pemasukan', {'count': 0, 'total_jumlah': 0})['total_jumlah'],
-                    "pengeluaran": transaksi_counts.get('pengeluaran', {'count': 0, 'total_jumlah': 0})['total_jumlah'],
-                    "totalKarung": sum(item['total_karung'] for item in transaksi_stats if item['total_karung']),
+                    "pemasukan": total_pemasukan,
+                    "pengeluaran": total_pengeluaran,
+                    "totalKarung": total_karung_transaksi,  # Hanya dari transaksi
                     "jenisStats": transaksi_counts
                 }
             }
@@ -604,7 +595,6 @@ def get_stats_user(current_user):
                     "total": 0,
                     "menunggu": 0,
                     "diproses": 0,
-                    "totalKarung": 0,
                     "statusStats": {}
                 },
                 "transaksi": {
@@ -625,7 +615,6 @@ def get_laporan_detail(current_user, id):
         conn = get_connection()
         cursor = conn.cursor()
         
-        # PERBAIKAN: Hapus JOIN dengan petugas karena tidak ada id_petugas
         sql = """
             SELECT 
                 l.*,
@@ -650,15 +639,7 @@ def get_laporan_detail(current_user, id):
         if current_user['role'] == 'warga' and row['warga_user_id'] != current_user['id']:
             return jsonify({"success": False, "message": "Tidak memiliki akses"}), 403
         
-        # Format estimasi volume ke jumlah karung
         estimasi_volume = row['estimasi_volume']
-        jumlah_karung = 0
-        if estimasi_volume == 'sedikit':
-            jumlah_karung = 1
-        elif estimasi_volume == 'sedang':
-            jumlah_karung = 2
-        elif estimasi_volume == 'banyak':
-            jumlah_karung = 3
         
         # Format status
         status_map = {
@@ -670,14 +651,15 @@ def get_laporan_detail(current_user, id):
         }
         status = status_map.get(row['status'], row['status'])
         
+        # PERBAIKAN: JANGAN konversi estimasi_volume ke angka
         # Format data
         formatted_data = {
             'id': row['id'],
             'kode_laporan': row['kode_laporan'],
             'jenis_sampah': row['jenis_sampah'],
             'jenis_lainnya': row['jenis_lainnya'],
-            'estimasi_volume': estimasi_volume,
-            'jumlah_karung': jumlah_karung,
+            'estimasi_volume': estimasi_volume,  # Kirim asli (sedikit/sedang/banyak)
+            'jumlah_karung': 0,  # Untuk laporan, 0 (gunakan estimasi_volume)
             'status': status,
             'catatan': row['keterangan'] or row['catatan_petugas'] or '',
             'tanggal_laporan': row['tanggal_laporan'].strftime('%Y-%m-%d %H:%M:%S') if row['tanggal_laporan'] else None,

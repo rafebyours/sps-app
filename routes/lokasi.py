@@ -12,63 +12,45 @@ def get_connection():
 # Atau gunakan decorator @cross_origin jika perlu
 
 # 1. GET LOKASI PETUGAS
-@lokasi_bp.route('/petugas', methods=['GET', 'OPTIONS'])
+# lokasi.py
+@lokasi_bp.route('/petugas', methods=['GET'])
 @token_required
 def get_lokasi_petugas(current_user):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        
-        # Query untuk mengambil data petugas dengan lokasi
+
         cursor.execute("""
-            SELECT 
+            SELECT
                 p.id,
-                p.nama_lengkap as nama_petugas,
-                p.latitude,
-                p.longitude,
+                p.nama_lengkap,
                 p.no_telepon,
-                p.alamat,
-                u.username,
-                u.email,
-                u.status
+                p.live_latitude,
+                p.live_longitude
             FROM petugas p
             JOIN users u ON p.user_id = u.id
-            WHERE u.status = 'active' 
-            AND p.latitude IS NOT NULL 
-            AND p.longitude IS NOT NULL
-            ORDER BY p.nama_lengkap ASC
+            WHERE p.live_latitude IS NOT NULL
+            AND p.live_longitude IS NOT NULL
+            AND p.is_online = 1
+
         """)
-        
-        petugas_list = cursor.fetchall()
+
+        data = cursor.fetchall()
         conn.close()
-        
-        # Format response
-        formatted_data = []
-        for petugas in petugas_list:
-            formatted_data.append({
-                'id': petugas['id'],
-                'nama_petugas': petugas['nama_petugas'],
-                'latitude': float(petugas['latitude']) if petugas['latitude'] else None,
-                'longitude': float(petugas['longitude']) if petugas['longitude'] else None,
-                'no_telepon': petugas['no_telepon'],
-                'alamat': petugas['alamat'],
-                'username': petugas['username'],
-                'email': petugas['email'],
-                'status': petugas['status']
-            })
-        
+
         return jsonify({
             'success': True,
-            'count': len(formatted_data),
-            'data': formatted_data
+            'count': len(data),
+            'data': data
         }), 200
-        
+
     except Exception as e:
-        print(f"Error in get_lokasi_petugas: {str(e)}")
+        print("Error get_lokasi_petugas:", e)
         return jsonify({
             'success': False,
-            'message': 'Terjadi kesalahan saat mengambil data lokasi petugas'
+            'message': 'Gagal mengambil lokasi petugas'
         }), 500
+
 
 # 2. UPDATE LOKASI PETUGAS (untuk mobile app petugas)
 @lokasi_bp.route('/petugas/<int:id>', methods=['PUT'])
@@ -90,7 +72,10 @@ def update_lokasi_petugas(current_user, id):
         # Update lokasi petugas
         cursor.execute("""
             UPDATE petugas 
-            SET latitude = %s, longitude = %s, updated_at = NOW()
+            SET live_latitude = %s,
+            live_longitude = %s,
+            live_location_updated = NOW(),
+            is_online = 1
             WHERE id = %s
         """, (data['latitude'], data['longitude'], id))
         
@@ -178,3 +163,43 @@ def get_petugas_terdekat(current_user):
             'success': False,
             'message': 'Terjadi kesalahan saat mencari petugas terdekat'
         }), 500
+        
+        
+# 4. LOGOUT PETUGAS (set is_online = 0)
+@lokasi_bp.route('/petugas/logout', methods=['POST'])
+@token_required
+def logout_petugas(current_user):
+    print("🔥 LOGOUT PETUGAS DIPANGGIL")
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE petugas
+            SET 
+                is_online = 0,
+                live_latitude = NULL,
+                live_longitude = NULL,
+                live_location_updated = NOW()
+            WHERE id = %s
+        """, (current_user['petugas_id'],))
+
+        conn.commit()
+        print("ROW AFFECTED:", cursor.rowcount)
+
+        return jsonify({
+            "success": True,
+            "message": "Logout & live location cleared"
+        }), 200
+
+    except Exception as e:
+        print("❌ ERROR LOGOUT PETUGAS:", e)
+        return jsonify({
+            "success": False,
+            "message": "Gagal logout petugas"
+        }), 500
+
+    finally:
+        if 'conn' in locals():
+            conn.close()

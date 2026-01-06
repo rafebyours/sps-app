@@ -186,23 +186,40 @@ def verify_token(current_user):
 
 # Logout endpoint
 @auth_bp.route('/logout', methods=['POST'])
-def logout():
+@token_required
+def logout(current_user):
     try:
-        # In a stateless JWT system, logout is handled client-side
-        # But we can blacklist tokens if needed (requires token store)
-        response = jsonify({
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # kalau yang logout adalah petugas → matiin live location
+        if current_user.get('role') == 'petugas':
+            cursor.execute("""
+                UPDATE petugas
+                SET
+                    is_online = 0,
+                    live_latitude = NULL,
+                    live_longitude = NULL,
+                    live_location_updated = NULL
+                WHERE user_id = %s
+            """, (current_user['id'],))
+
+            conn.commit()
+
+        conn.close()
+
+        return jsonify({
             "success": True,
-            "message": "Logout successful"
-        })
-        
-        return response, 200
-        
+            "message": "Logout berhasil, status petugas dimatikan"
+        }), 200
+
     except Exception as e:
-        print(f"Logout error: {str(e)}")
+        print("Logout error:", e)
         return jsonify({
             "success": False,
-            "message": "Server error during logout"
+            "message": "Gagal logout"
         }), 500
+
 
 # Get current user info
 @auth_bp.route('/me', methods=['GET'])

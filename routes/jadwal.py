@@ -1,13 +1,56 @@
-# routes/jadwal.py
-from flask import Blueprint, request, jsonify, make_response
+from flask import Blueprint, request, jsonify, make_response, current_app
 import pymysql
 from config import DB_CONFIG
 from datetime import datetime, date, timedelta
+import json
 
 jadwal_bp = Blueprint('jadwal', __name__, url_prefix='/api/jadwal')
 
 def get_connection():
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
+
+def send_jadwal_notification_safe(jadwal_id, action='created'):
+    """Safe wrapper to send jadwal notification"""
+    try:
+        from app import send_jadwal_notification
+        
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            # Get complete jadwal data
+            sql = """
+                SELECT j.*, 
+                       GROUP_CONCAT(DISTINCT p.nama_lengkap SEPARATOR ', ') as nama_petugas,
+                       GROUP_CONCAT(DISTINCT jp.petugas_id) as petugas_ids
+                FROM jadwal j
+                LEFT JOIN jadwal_petugas jp ON j.id = jp.jadwal_id
+                LEFT JOIN petugas p ON jp.petugas_id = p.id
+                WHERE j.id = %s
+                GROUP BY j.id
+            """
+            cursor.execute(sql, (jadwal_id,))
+            jadwal_data = cursor.fetchone()
+            
+            if jadwal_data:
+                # Format petugas_ids
+                if jadwal_data['petugas_ids']:
+                    jadwal_data['petugas_ids'] = [int(pid) for pid in jadwal_data['petugas_ids'].split(',') if pid]
+                else:
+                    jadwal_data['petugas_ids'] = []
+                
+                # Format tanggal
+                if 'tanggal' in jadwal_data and jadwal_data['tanggal']:
+                    if isinstance(jadwal_data['tanggal'], date):
+                        jadwal_data['tanggal'] = jadwal_data['tanggal'].strftime('%Y-%m-%d')
+                
+                # Send notification
+                send_jadwal_notification(jadwal_data, action)
+                print(f"✅ Notification sent for jadwal {jadwal_id} ({action})")
+        
+        conn.close()
+        
+    except Exception as e:
+        print(f"⚠️ Failed to send notification for jadwal {jadwal_id}: {e}")
+        # Don't fail the main operation if notification fails
 
 @jadwal_bp.before_request
 def handle_options():
@@ -23,6 +66,9 @@ def after_request(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+    return response
+
+# ==================== JADWAL ENDPOINTS WITH NOTIFICATIONS ====================
     return response
 
 
@@ -210,6 +256,7 @@ def get_all_jadwal():
 # POST /api/jadwal/multi - Create dengan multiple petugas
 @jadwal_bp.route('/multi', methods=['POST'])
 def create_jadwal_multi():
+    """Create jadwal with multiple petugas - WITH NOTIFICATION"""
     data = request.json or {}
 
     tanggal = data.get('tanggal')
@@ -217,23 +264,22 @@ def create_jadwal_multi():
     jam_selesai = data.get('jam_selesai')
     wilayah = data.get('wilayah')
     keterangan = data.get('keterangan', '')
-    petugas_ids = data.get('petugas_ids', [])  # array of petugas IDs
+    petugas_ids = data.get('petugas_ids', [])
     status = data.get('status', 'aktif')
 
     # Validasi
-    if not tanggal or not jam_mulai or not jam_selesai or not wilayah:
+    if not all([tanggal, jam_mulai, jam_selesai, wilayah]):
         return jsonify({
             "success": False,
             "message": "tanggal, jam_mulai, jam_selesai, dan wilayah wajib diisi"
         }), 400
 
-    if not petugas_ids or len(petugas_ids) == 0:
+    if not petugas_ids:
         return jsonify({
             "success": False,
             "message": "Minimal pilih 1 petugas"
         }), 400
 
-    # Validasi tanggal
     try:
         datetime.strptime(tanggal, "%Y-%m-%d")
     except ValueError:
@@ -242,7 +288,7 @@ def create_jadwal_multi():
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Validasi semua petugas ada
+            # Validasi petugas
             placeholders = ','.join(['%s'] * len(petugas_ids))
             sql = f"SELECT id FROM petugas WHERE id IN ({placeholders})"
             cursor.execute(sql, petugas_ids)
@@ -254,28 +300,23 @@ def create_jadwal_multi():
                     "message": "Beberapa petugas tidak ditemukan"
                 }), 400
 
-            # ===== INSERT jadwal =====
+            # Insert jadwal
             sql_insert_jadwal = """
                 INSERT INTO jadwal 
                 (tanggal, jam_mulai, jam_selesai, wilayah, keterangan, status)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """
             
-            # Normalize time format
             jam_mulai_norm = jam_mulai + ":00" if len(jam_mulai) == 5 else jam_mulai
             jam_selesai_norm = jam_selesai + ":00" if len(jam_selesai) == 5 else jam_selesai
             
             cursor.execute(sql_insert_jadwal, (
-                tanggal,
-                jam_mulai_norm,
-                jam_selesai_norm,
-                wilayah,
-                keterangan,
-                status
+                tanggal, jam_mulai_norm, jam_selesai_norm, 
+                wilayah, keterangan, status
             ))
             jadwal_id = cursor.lastrowid
 
-            # ===== INSERT ke jadwal_petugas =====
+            # Insert petugas
             for pid in petugas_ids:
                 cursor.execute(
                     "INSERT INTO jadwal_petugas (jadwal_id, petugas_id) VALUES (%s, %s)",
@@ -284,15 +325,19 @@ def create_jadwal_multi():
 
             conn.commit()
 
+            # SEND NOTIFICATION
+            send_jadwal_notification_safe(jadwal_id, 'created')
+
         return jsonify({
             "success": True,
             "message": f"Jadwal berhasil dibuat untuk {len(petugas_ids)} petugas",
-            "jadwal_id": jadwal_id
+            "jadwal_id": jadwal_id,
+            "notification_sent": True
         }), 201
 
     except Exception as e:
         conn.rollback()
-        print("create_jadwal_multi error:", e)
+        print(f"create_jadwal_multi error: {e}")
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()
@@ -348,72 +393,110 @@ def get_jadwal_by_id(jadwal_id):
 # PATCH /api/jadwal/<id> - Update jadwal dengan multiple petugas
 @jadwal_bp.route('/<int:jadwal_id>', methods=['PATCH'])
 def update_jadwal(jadwal_id):
+    """Update jadwal - WITH NOTIFICATION"""
     data = request.json or {}
 
     tanggal = data.get('tanggal')
     jam_mulai = data.get('jam_mulai')
     jam_selesai = data.get('jam_selesai')
     wilayah = data.get('wilayah')
-    keterangan = data.get('keterangan', '')
-    status = data.get('status', 'aktif')
-    petugas_ids = data.get('petugas_ids', [])
+    keterangan = data.get('keterangan')
+    status = data.get('status')
+    petugas_ids = data.get('petugas_ids')
     
-    # Validasi
-    if not tanggal or not jam_mulai or not jam_selesai or not wilayah:
-        return jsonify({"success": False, "message": "tanggal, jam_mulai, jam_selesai, dan wilayah wajib diisi"}), 400
-
-    # Validasi tanggal
-    try:
-        datetime.strptime(tanggal, "%Y-%m-%d")
-    except ValueError:
-        return jsonify({"success": False, "message": "Format tanggal harus YYYY-MM-DD"}), 400
-
-    # Validasi petugas
-    if not petugas_ids or len(petugas_ids) == 0:
-        return jsonify({"success": False, "message": "Minimal pilih 1 petugas"}), 400
+    # Validasi minimal satu field diupdate
+    if not any([tanggal, jam_mulai, jam_selesai, wilayah, keterangan, status, petugas_ids]):
+        return jsonify({"success": False, "message": "Tidak ada data yang diupdate"}), 400
 
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Update data jadwal
-            sql_update = """
-                UPDATE jadwal
-                SET tanggal=%s, 
-                    jam_mulai=%s, 
-                    jam_selesai=%s, 
-                    wilayah=%s, 
-                    keterangan=%s,
-                    status=%s
-                WHERE id=%s
-            """
-            
-            # Normalize time format
-            jam_mulai_norm = jam_mulai + ":00" if len(jam_mulai) == 5 else jam_mulai
-            jam_selesai_norm = jam_selesai + ":00" if len(jam_selesai) == 5 else jam_selesai
-            
-            cursor.execute(sql_update, (
-                tanggal,
-                jam_mulai_norm,
-                jam_selesai_norm,
-                wilayah,
-                keterangan,
-                status,
-                jadwal_id
-            ))
+            # Cek jadwal exist
+            cursor.execute("SELECT id FROM jadwal WHERE id = %s", (jadwal_id,))
+            if not cursor.fetchone():
+                return jsonify({"success": False, "message": "Jadwal tidak ditemukan"}), 404
 
-            # Hapus petugas lama di jadwal_petugas
-            cursor.execute("DELETE FROM jadwal_petugas WHERE jadwal_id=%s", (jadwal_id,))
+            # Update jadwal
+            update_fields = []
+            params = []
+            
+            if tanggal:
+                try:
+                    datetime.strptime(tanggal, "%Y-%m-%d")
+                    update_fields.append("tanggal = %s")
+                    params.append(tanggal)
+                except ValueError:
+                    return jsonify({"success": False, "message": "Format tanggal harus YYYY-MM-DD"}), 400
+            
+            if jam_mulai:
+                jam_mulai_norm = jam_mulai + ":00" if len(jam_mulai) == 5 else jam_mulai
+                update_fields.append("jam_mulai = %s")
+                params.append(jam_mulai_norm)
+            
+            if jam_selesai:
+                jam_selesai_norm = jam_selesai + ":00" if len(jam_selesai) == 5 else jam_selesai
+                update_fields.append("jam_selesai = %s")
+                params.append(jam_selesai_norm)
+            
+            if wilayah:
+                update_fields.append("wilayah = %s")
+                params.append(wilayah)
+            
+            if keterangan is not None:
+                update_fields.append("keterangan = %s")
+                params.append(keterangan)
+            
+            if status:
+                update_fields.append("status = %s")
+                params.append(status)
+            
+            params.append(jadwal_id)
+            
+            if update_fields:
+                sql_update = f"UPDATE jadwal SET {', '.join(update_fields)} WHERE id = %s"
+                cursor.execute(sql_update, params)
 
-            # Insert petugas baru
-            for pid in petugas_ids:
-                cursor.execute("INSERT INTO jadwal_petugas (jadwal_id, petugas_id) VALUES (%s,%s)", (jadwal_id, pid))
+            # Update petugas jika diberikan
+            if petugas_ids is not None:
+                if not petugas_ids:
+                    return jsonify({"success": False, "message": "Minimal pilih 1 petugas"}), 400
+                
+                # Validasi petugas
+                placeholders = ','.join(['%s'] * len(petugas_ids))
+                sql = f"SELECT id FROM petugas WHERE id IN ({placeholders})"
+                cursor.execute(sql, petugas_ids)
+                existing_petugas = [row['id'] for row in cursor.fetchall()]
+
+                if len(existing_petugas) != len(petugas_ids):
+                    return jsonify({
+                        "success": False,
+                        "message": "Beberapa petugas tidak ditemukan"
+                    }), 400
+                
+                # Hapus petugas lama
+                cursor.execute("DELETE FROM jadwal_petugas WHERE jadwal_id = %s", (jadwal_id,))
+                
+                # Insert petugas baru
+                for pid in petugas_ids:
+                    cursor.execute(
+                        "INSERT INTO jadwal_petugas (jadwal_id, petugas_id) VALUES (%s, %s)",
+                        (jadwal_id, pid)
+                    )
 
             conn.commit()
 
-        return jsonify({"success": True, "message": "Jadwal berhasil diperbarui"}), 200
+            # SEND NOTIFICATION
+            send_jadwal_notification_safe(jadwal_id, 'updated')
+
+        return jsonify({
+            "success": True,
+            "message": "Jadwal berhasil diperbarui",
+            "notification_sent": True
+        }), 200
+        
     except Exception as e:
         conn.rollback()
-        print("update_jadwal error:", e)
+        print(f"update_jadwal error: {e}")
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()
@@ -421,10 +504,11 @@ def update_jadwal(jadwal_id):
 # PATCH /api/jadwal/<id>/toggle-status - Toggle status
 @jadwal_bp.route('/<int:jadwal_id>/toggle-status', methods=['PATCH'])
 def toggle_jadwal_status(jadwal_id):
+    """Toggle jadwal status - WITH NOTIFICATION"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Cek jadwal ada
+            # Cek jadwal
             cursor.execute("SELECT status FROM jadwal WHERE id = %s", (jadwal_id,))
             jadwal = cursor.fetchone()
             
@@ -433,19 +517,24 @@ def toggle_jadwal_status(jadwal_id):
             
             # Toggle status
             new_status = 'nonaktif' if jadwal['status'] == 'aktif' else 'aktif'
+            action = 'cancelled' if new_status == 'nonaktif' else 'updated'
             
             cursor.execute("UPDATE jadwal SET status = %s WHERE id = %s", (new_status, jadwal_id))
             conn.commit()
             
+            # SEND NOTIFICATION
+            send_jadwal_notification_safe(jadwal_id, action)
+
         return jsonify({
             "success": True,
             "message": f"Status jadwal berhasil diubah menjadi {new_status}",
-            "new_status": new_status
+            "new_status": new_status,
+            "notification_sent": True
         }), 200
         
     except Exception as e:
         conn.rollback()
-        print("toggle_jadwal_status error:", e)
+        print(f"toggle_jadwal_status error: {e}")
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()
@@ -453,28 +542,49 @@ def toggle_jadwal_status(jadwal_id):
 # DELETE /api/jadwal/<id>
 @jadwal_bp.route('/<int:jadwal_id>', methods=['DELETE'])
 def delete_jadwal(jadwal_id):
+    """Delete jadwal - WITH NOTIFICATION"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            # Cek jadwal ada
-            cursor.execute("SELECT id FROM jadwal WHERE id = %s", (jadwal_id,))
-            jadwal = cursor.fetchone()
+            # Get jadwal data before deletion (for notification)
+            cursor.execute("""
+                SELECT j.*, 
+                       GROUP_CONCAT(DISTINCT jp.petugas_id) as petugas_ids
+                FROM jadwal j
+                LEFT JOIN jadwal_petugas jp ON j.id = jp.jadwal_id
+                WHERE j.id = %s
+                GROUP BY j.id
+            """, (jadwal_id,))
+            jadwal_data = cursor.fetchone()
             
-            if not jadwal:
+            if not jadwal_data:
                 return jsonify({"success": False, "message": "Jadwal tidak ditemukan"}), 404
             
-            # Hapus (cascade akan menghapus relasi di jadwal_petugas)
+            # Format data for notification
+            if jadwal_data['petugas_ids']:
+                jadwal_data['petugas_ids'] = [int(pid) for pid in jadwal_data['petugas_ids'].split(',') if pid]
+            
+            # Delete jadwal
             cursor.execute("DELETE FROM jadwal WHERE id = %s", (jadwal_id,))
             conn.commit()
             
+            # SEND NOTIFICATION
+            try:
+                from app import send_jadwal_notification
+                send_jadwal_notification(jadwal_data, 'cancelled')
+                print(f"✅ Deletion notification sent for jadwal {jadwal_id}")
+            except Exception as notify_error:
+                print(f"⚠️ Failed to send deletion notification: {notify_error}")
+
         return jsonify({
             "success": True,
-            "message": "Jadwal berhasil dihapus"
+            "message": "Jadwal berhasil dihapus",
+            "notification_sent": True
         }), 200
         
     except Exception as e:
         conn.rollback()
-        print("delete_jadwal error:", e)
+        print(f"delete_jadwal error: {e}")
         return jsonify({"success": False, "message": "Server error"}), 500
     finally:
         conn.close()

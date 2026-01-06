@@ -11,14 +11,6 @@ def get_connection():
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **DB_CONFIG)
 
 # CORS Middleware
-@warga_bp.before_request
-def handle_options():
-    if request.method == 'OPTIONS':
-        response = make_response()
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        return response
 
 @warga_bp.after_request
 def after_request(response):
@@ -799,40 +791,53 @@ def get_warga_by_user_id(user_id):
 @token_required
 def get_warga_list(current_user):
     try:
-        print("=== GET WARGA LIST ENDPOINT CALLED ===")
-        print(f"Current user: {current_user}")
+        print("=" * 50)
+        print(f"📋 GET WARGA LIST DIPANGGIL oleh: {current_user}")
+        print(f"📋 User ID: {current_user['id']}, Role: {current_user['role']}")
         
         conn = get_connection()
         cursor = conn.cursor()
         
-        cursor.execute("""
+        # Query untuk mengambil data warga
+        query = """
             SELECT 
                 w.id,
                 w.nama_lengkap,
                 w.alamat_lengkap,
                 w.rt,
                 w.rw,
-                w.saldo,
+                COALESCE(w.saldo, 0) as saldo,
                 w.no_telepon
             FROM warga w
             JOIN users u ON w.user_id = u.id
             WHERE u.status = 'active'
             ORDER BY w.nama_lengkap ASC
-        """)
+        """
         
+        print(f"📋 Executing query: {query}")
+        cursor.execute(query)
         warga_list = cursor.fetchall()
-        conn.close()
         
-        print(f"Found {len(warga_list)} warga")
+        print(f"📋 Found {len(warga_list)} warga")
+        for i, warga in enumerate(warga_list[:5]):  # Log 5 pertama
+            print(f"  {i+1}. {warga['nama_lengkap']} (ID: {warga['id']})")
+        
+        if len(warga_list) > 5:
+            print(f"  ... dan {len(warga_list) - 5} lainnya")
+        
+        conn.close()
         
         return jsonify({
             'success': True,
             'data': warga_list,
-            'count': len(warga_list)
+            'count': len(warga_list),
+            'message': f'Ditemukan {len(warga_list)} warga aktif'
         }), 200
         
     except Exception as e:
-        print(f"Error get_warga_list: {str(e)}")
+        print(f"❌ ERROR in get_warga_list: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'message': 'Gagal mengambil data warga',

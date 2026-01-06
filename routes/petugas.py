@@ -4,6 +4,7 @@ from config import DB_CONFIG
 import re
 from werkzeug.security import generate_password_hash
 from .auth import token_required
+from datetime import datetime, timedelta
 
 petugas_bp = Blueprint('petugas', __name__, url_prefix='/api/petugas')
 
@@ -1366,3 +1367,382 @@ def get_petugas_by_user_id(current_user, user_id):
             'success': False,
             'message': 'Terjadi kesalahan saat mengambil data petugas'
         }), 500
+        
+@petugas_bp.route('/update-location', methods=['POST'])
+@token_required
+def update_location(current_user):
+    try:
+        data = request.json
+        user_id = current_user.get('id')
+        
+        print(f"📡 Update location request from user {user_id}: {data}")
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Hanya update lokasi di table petugas saja
+        cursor.execute("""
+            UPDATE petugas 
+            SET live_latitude = %s,
+                live_longitude = %s,
+                live_location_updated = NOW(),
+                is_online = 1
+            WHERE user_id = %s
+        """, (data['latitude'], data['longitude'], user_id))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Lokasi berhasil diperbarui'
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error update_location: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Gagal update lokasi: {str(e)}'
+        }), 500
+
+@petugas_bp.route('/set-online-status', methods=['POST'])
+@token_required
+def set_petugas_online_status(current_user):
+    """Set online/offline status petugas"""
+    try:
+        data = request.json
+        is_online = data.get('is_online', False)
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id FROM petugas WHERE user_id = %s", (current_user['id'],))
+        petugas = cursor.fetchone()
+        
+        if not petugas:
+            conn.close()
+            return jsonify({'success': False, 'message': 'Petugas tidak ditemukan'}), 404
+        
+        petugas_id = petugas['id']
+        
+        if is_online:
+            # Set online
+            cursor.execute("""
+                UPDATE petugas 
+                SET is_online = 1,
+                    last_online = NOW()
+                WHERE id = %s
+            """, (petugas_id,))
+            message = "Status online diaktifkan"
+        else:
+            # Set offline - clear live location
+            cursor.execute("""
+                UPDATE petugas 
+                SET is_online = 0,
+                    live_latitude = NULL,
+                    live_longitude = NULL,
+                    live_location_updated = NULL
+                WHERE id = %s
+            """, (petugas_id,))
+            message = "Status offline diaktifkan"
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'message': message,
+            'data': {
+                'is_online': is_online,
+                'petugas_id': petugas_id
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error set_petugas_online_status: {e}")
+        return jsonify({'success': False, 'message': 'Gagal mengubah status'}), 500
+
+@petugas_bp.route('/live-locations', methods=['GET'])
+@token_required
+def get_live_petugas_locations(current_user):
+    """Get live locations of all online petugas (for admin/monitoring)"""
+    try:
+        # Cek apakah user adalah admin
+        if current_user['role'] not in ['admin', 'petugas']:
+            return jsonify({
+                'success': False,
+                'message': 'Akses ditolak. Hanya admin dan petugas yang bisa melihat lokasi'
+            }), 403
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Get petugas yang online dalam 10 menit terakhir
+        sql = """
+            SELECT 
+                p.id,
+                p.nama_lengkap,
+                p.no_telepon,
+                p.live_latitude,
+                p.live_longitude,
+                p.live_location_updated,
+                p.is_online,
+                p.last_online,
+                u.username,
+                TIMESTAMPDIFF(MINUTE, p.live_location_updated, NOW()) as minutes_ago,
+                TIMESTAMPDIFF(SECOND, p.live_location_updated, NOW()) as seconds_ago
+            FROM petugas p
+            JOIN users u ON p.user_id = u.id
+            WHERE p.status_kerja = 'aktif'
+            AND p.is_online = 1 
+            AND p.live_latitude IS NOT NULL 
+            AND p.live_longitude IS NOT NULL
+            AND p.live_location_updated >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+            ORDER BY p.live_location_updated DESC
+        """
+        
+        cursor.execute(sql)
+        petugas_list = cursor.fetchall()
+        
+        formatted_data = []
+        for petugas in petugas_list:
+            # Calculate status based on last update
+            minutes_ago = petugas['minutes_ago'] or 0
+            seconds_ago = petugas['seconds_ago'] or 0
+            
+            if seconds_ago < 60:  # kurang dari 1 menit
+                status = 'online'
+                status_color = 'positive'
+                status_text = 'Online'
+            elif minutes_ago < 3:  # 1-3 menit
+                status = 'recent'
+                status_color = 'warning'
+                status_text = 'Baru saja'
+            elif minutes_ago < 10:  # 3-10 menit
+                status = 'away'
+                status_color = 'orange'
+                status_text = 'Beberapa menit lalu'
+            else:
+                status = 'offline'
+                status_color = 'negative'
+                status_text = 'Offline'
+            
+            formatted_data.append({
+                'id': petugas['id'],
+                'nama_lengkap': petugas['nama_lengkap'],
+                'username': petugas['username'],
+                'no_telepon': petugas['no_telepon'] or '',
+                'latitude': float(petugas['live_latitude']) if petugas['live_latitude'] else None,
+                'longitude': float(petugas['live_longitude']) if petugas['live_longitude'] else None,
+                'last_updated': petugas['live_location_updated'].strftime('%Y-%m-%d %H:%M:%S') if petugas['live_location_updated'] else None,
+                'last_online': petugas['last_online'].strftime('%Y-%m-%d %H:%M:%S') if petugas['last_online'] else None,
+                'status': status,
+                'status_color': status_color,
+                'status_text': status_text,
+                'minutes_ago': minutes_ago,
+                'seconds_ago': seconds_ago,
+                'is_online': bool(petugas['is_online'])
+            })
+        
+        # Get offline petugas count
+        cursor.execute("""
+            SELECT COUNT(*) as offline_count 
+            FROM petugas 
+            WHERE status_kerja = 'aktif' 
+            AND (is_online = 0 OR is_online IS NULL)
+        """)
+        offline_count = cursor.fetchone()['offline_count']
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'data': formatted_data,
+            'stats': {
+                'online': len(formatted_data),
+                'offline': offline_count,
+                'total': len(formatted_data) + offline_count
+            },
+            'message': f'Ditemukan {len(formatted_data)} petugas online'
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error get_live_petugas_locations: {e}")
+        return jsonify({
+            'success': False,
+            'message': 'Gagal mengambil data lokasi'
+        }), 500
+
+@petugas_bp.route('/my-location', methods=['GET'])
+@token_required
+def get_my_location(current_user):
+    """Get current petugas own location"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                p.id,
+                p.nama_lengkap,
+                p.live_latitude,
+                p.live_longitude,
+                p.live_location_updated,
+                p.is_online,
+                p.last_online,
+                TIMESTAMPDIFF(SECOND, p.live_location_updated, NOW()) as seconds_ago
+            FROM petugas p
+            WHERE p.user_id = %s
+        """, (current_user['id'],))
+        
+        petugas = cursor.fetchone()
+        conn.close()
+        
+        if not petugas:
+            return jsonify({'success': False, 'message': 'Petugas tidak ditemukan'}), 404
+        
+        # Calculate freshness
+        seconds_ago = petugas['seconds_ago'] or 9999
+        is_fresh = seconds_ago < 300  # Kurang dari 5 menit = fresh
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'id': petugas['id'],
+                'nama_lengkap': petugas['nama_lengkap'],
+                'latitude': float(petugas['live_latitude']) if petugas['live_latitude'] else None,
+                'longitude': float(petugas['live_longitude']) if petugas['live_longitude'] else None,
+                'last_updated': petugas['live_location_updated'].strftime('%Y-%m-%d %H:%M:%S') if petugas['live_location_updated'] else None,
+                'last_online': petugas['last_online'].strftime('%Y-%m-%d %H:%M:%S') if petugas['last_online'] else None,
+                'is_online': bool(petugas['is_online']),
+                'is_fresh': is_fresh,
+                'seconds_ago': seconds_ago
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error get_my_location: {e}")
+        return jsonify({'success': False, 'message': 'Gagal mengambil lokasi'}), 500
+
+@petugas_bp.route('/location-history/<int:petugas_id>', methods=['GET'])
+@token_required
+def get_location_history(current_user, petugas_id):
+    """Get location history for a petugas (admin only)"""
+    try:
+        # Cek apakah user adalah admin
+        if current_user['role'] != 'admin':
+            return jsonify({
+                'success': False,
+                'message': 'Akses ditolak. Hanya admin yang bisa melihat history'
+            }), 403
+        
+        date_from = request.args.get('date_from', '')
+        date_to = request.args.get('date_to', '')
+        limit = request.args.get('limit', 100, type=int)
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        # Cek apakah petugas ada
+        cursor.execute("SELECT nama_lengkap FROM petugas WHERE id = %s", (petugas_id,))
+        petugas = cursor.fetchone()
+        
+        if not petugas:
+            conn.close()
+            return jsonify({'success': False, 'message': 'Petugas tidak ditemukan'}), 404
+        
+        # Query history
+        sql = """
+            SELECT 
+                id,
+                latitude,
+                longitude,
+                accuracy,
+                speed,
+                heading,
+                battery_level,
+                created_at,
+                DATE(created_at) as tanggal,
+                TIME(created_at) as waktu
+            FROM petugas_tracking_history
+            WHERE petugas_id = %s
+        """
+        params = [petugas_id]
+        
+        if date_from:
+            sql += " AND DATE(created_at) >= %s"
+            params.append(date_from)
+        
+        if date_to:
+            sql += " AND DATE(created_at) <= %s"
+            params.append(date_to)
+        
+        sql += " ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+        
+        cursor.execute(sql, params)
+        history = cursor.fetchall()
+        
+        conn.close()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'petugas': petugas['nama_lengkap'],
+                'history': history,
+                'count': len(history)
+            },
+            'message': f'Ditemukan {len(history)} data history lokasi'
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error get_location_history: {e}")
+        return jsonify({'success': False, 'message': 'Gagal mengambil history'}), 500
+
+@petugas_bp.route('/check-status', methods=['GET'])
+@token_required
+def check_petugas_status(current_user):
+    """Check if current user is petugas and get status"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                p.id,
+                p.nama_lengkap,
+                p.is_online,
+                p.live_latitude,
+                p.live_longitude,
+                p.live_location_updated,
+                p.status_kerja
+            FROM petugas p
+            WHERE p.user_id = %s
+        """, (current_user['id'],))
+        
+        petugas = cursor.fetchone()
+        conn.close()
+        
+        if not petugas:
+            return jsonify({
+                'success': False,
+                'is_petugas': False,
+                'message': 'User bukan petugas'
+            }), 200
+        
+        return jsonify({
+            'success': True,
+            'is_petugas': True,
+            'data': {
+                'id': petugas['id'],
+                'nama_lengkap': petugas['nama_lengkap'],
+                'is_online': bool(petugas['is_online']),
+                'has_location': petugas['live_latitude'] is not None and petugas['live_longitude'] is not None,
+                'status_kerja': petugas['status_kerja'],
+                'last_updated': petugas['live_location_updated'].strftime('%Y-%m-%d %H:%M:%S') if petugas['live_location_updated'] else None
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error check_petugas_status: {e}")
+        return jsonify({'success': False, 'message': 'Gagal memeriksa status'}), 500
